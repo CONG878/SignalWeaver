@@ -2,7 +2,7 @@
 Purpose:
     KRX 원시 주가 데이터 수집 전용 모듈
     - 책임: 외부 API → CSV 저장만 수행
-    - Feature 계산, 필터링, 변환 등은 일절 수행하지 않음
+    - Feature 계산, 필터링, 변환 등은 일체 수행하지 않음
 
 Design Principles:
     - Single Responsibility: 데이터 "수집"만 담당
@@ -78,8 +78,8 @@ def random_sleep(min_seconds: float, max_seconds: float) -> None:
     - 약 30%: 0.2~0.5초  
     - 약 10%: 0.5~1.0초
     """
-    log_wait = random.uniform(math.log(min_seconds), math.log(max_seconds))
-    wait_time = math.exp(log_wait)
+    log_wait = random.uniform(math.log10(min_seconds), math.log10(max_seconds))
+    wait_time = 10 ** log_wait
     time.sleep(wait_time)
 
 
@@ -258,9 +258,18 @@ class RawPriceCollector:
         -------
         bool
             저장 성공 여부
+            
+        Note
+        ----
+        ticker 컬럼을 자동으로 추가하여 저장합니다.
+        이는 02단계에서 파일 병합 시 종목 구분을 위해 필수입니다.
         """
         if df.empty:
             return False
+        
+        # ticker 컬럼 추가 (date 다음 위치에)
+        # 파일명만으로는 종목 구분이 불안정하므로 컬럼으로 명시
+        df.insert(1, 'ticker', ticker)
         
         safe_name = safe_filename(name)
         file_path = self.output_dir / f"{safe_name}.csv"
