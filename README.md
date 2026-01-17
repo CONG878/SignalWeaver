@@ -38,8 +38,8 @@ SignalWeaver/
 * **설정**: `config.yaml`의 `data_collection` 섹션 참조
 * **역할**: KRX 전 종목 시세 수집, 종목 마스터 생성
 * **출력**:
-* 통합 데이터: `data/01_raw/{date}/krx_prices_{date}.parquet`
-* 디버깅용: `data/01_raw/{date}/csv/*.csv`
+  * 통합 데이터: `data/01_raw/{date}/krx_prices_{date}.parquet`
+  * 디버깅용: `data/01_raw/{date}/csv/*.csv`
 
 
 
@@ -53,11 +53,12 @@ SignalWeaver/
 
 * **설정**: `config.yaml`의 `training` 섹션 참조
 * **역할**:
-* T-1 시점 피처 정렬 (Data Shift)
-* Rolling Walk-Forward 학습 및 검증
-* 모델 및 예측 결과 분리 저장
+  * T-1 시점 피처 정렬 (Data Shift)
+  * Rolling Walk-Forward 학습 및 검증
+  * 모델 및 예측 결과 분리 저장
 
 
 * **출력**:
-* 결과: `data/03_results/{date}/predictions.parquet`
-* 모델: `data/04_models/{date}/*.pkl`
+  * 결과: `data/03_results/{date}/predictions.parquet`
+
+  * 모델: `data/04_models/{date}/*.pkl`
