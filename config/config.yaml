@@ -1,0 +1,48 @@
+# SignalWeaver 프로젝트 공통 설정
+project:
+  name: "SignalWeaver"
+  reference_date: "20260116"
+
+# 01_collect_data 관련 설정
+data_collection:
+  start_date: "20221021"
+  end_date: "20260116"
+  save_csv: True        # CSV 저장 활성화 (사람용)
+  save_parquet: True    # Parquet 저장 활성화 (기계용)
+  min_sleep: 0.05
+  max_sleep: 0.8
+
+# 02_build_dataset 관련 설정
+preprocessing:
+  min_history: 60
+  technical_windows: [5, 20, 60]
+  volume_window: 20
+  rsi_period: 14
+  save_csv: True        # CSV 저장 활성화 (사람용)
+  save_parquet: True    # Parquet 저장 활성화 (기계용)
+
+# 03_train_predict 관련 설정
+training:
+  train_end: "2025-01-15"
+  valid_window_days: 60
+  test_window_days: 63
+  num_valid: 3
+  target_col: "target_log_close"
+  lgbm_params:
+    objective: "regression"
+    metric: "rmse"
+    boosting_type: "gbdt"
+    num_leaves: 31
+    learning_rate: 0.05
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 5
+    verbose: -1
+    random_state: 42
+
+# 경로 설정
+paths:
+  raw_dir: "data/01_raw"
+  processed_dir: "data/02_processed"
+  result_dir: "data/03_results"
+  model_dir: "data/04_models"
