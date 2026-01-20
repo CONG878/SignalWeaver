@@ -8,26 +8,22 @@ from src.models.base import ModelBase
 import copy
 
 class WalkForwardTrainer:
-    """
-    Rolling Window 방식의 Walk-Forward 학습/검증 관리자
-    - 매 검증 구간마다 학습 데이터를 이동(Rolling)시키며 모델을 재학습합니다.
-    - Test Set은 마지막 검증 구간 다음의 N+1번째 구간으로 취급합니다.
-    """
-
     def __init__(
         self,
         *,
         model: ModelBase,
         feature_cols: List[str],
-        target_col: str,
+        target_col_prefix: str = "target_log_close",
         date_col: str = "date",
         categorical_features: Optional[List[str]] = None,
+        base_price_col: str = "close"
     ):
         self.model = model
         self.feature_cols = feature_cols
-        self.target_col = target_col
+        self.target_col_prefix = target_col_prefix
         self.date_col = date_col
         self.categorical_features = categorical_features or []
+        self.base_price_col = base_price_col
 
     def run(
         self,
@@ -39,149 +35,152 @@ class WalkForwardTrainer:
         num_valid: int = 1,
         fit_kwargs: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        """
-        Rolling Window Walk-Forward 실행
-
-        Parameters
-        ----------
-        df : DataFrame (전체 데이터)
-        train_end : str (첫 번째 Fold의 학습 종료일)
-        valid_window_days : int (검증 윈도우 크기 - 거래일 기준)
-        test_window_days : int (테스트 윈도우 크기 - 거래일 기준)
-        num_valid : int (검증 Fold 횟수)
-        """
         fit_kwargs = fit_kwargs or {}
+        target_cols = getattr(self.model, 'target_columns', [self.target_col_prefix])
         
-        # 날짜 정렬 및 초기화
-        df = df.sort_values(self.date_col).reset_index(drop=True)
-        all_dates = pd.to_datetime(df[self.date_col].unique())
-        all_dates = np.sort(all_dates)
+        # 초기화: 데이터 정렬 및 날짜 타입 보정
+        df_run = df.copy().sort_values([self.date_col, 'ticker'])
+        df_run[self.date_col] = pd.to_datetime(df_run[self.date_col])
         
-        # 첫 학습 종료일의 인덱스 찾기
-        train_end_dt = pd.to_datetime(train_end)
-        if train_end_dt not in all_dates:
-            # train_end가 거래일이 아니면 가장 가까운 이전 거래일 찾기
-            train_end_idx = np.searchsorted(all_dates, train_end_dt)
-        else:
-            train_end_idx = np.where(all_dates == train_end_dt)[0][0] + 1
+        # 타깃 생성 (현재 시점 가격)
+        for col in target_cols:
+            df_run[col] = np.log(df_run[self.base_price_col])
 
-        # 결과 저장소
+        # 날짜 인덱싱
+        all_dates = np.sort(df_run[self.date_col].unique())
+        train_end_val = pd.to_datetime(train_end).to_datetime64()
+        train_end_idx = np.searchsorted(all_dates, train_end_val)
+        if train_end_idx < len(all_dates) and all_dates[train_end_idx] == train_end_val:
+            train_end_idx += 1
+
         valid_metrics_history = []
         test_metrics = {}
         test_predictions = pd.DataFrame()
+        final_model = None
         
-        # 총 반복 횟수: 검증 횟수(num_valid) + 테스트(1)
-        # 테스트는 마지막 검증 직후의 구간을 의미
-        total_folds = num_valid + 1
-        
-        print(f"🚀 Starting Rolling Window Training (Total {total_folds} folds)")
-        print(f"   - Initial Train End: {train_end}")
-        print(f"   - Window Size: {valid_window_days} days (Test: {test_window_days} days)")
-        
-        # 초기 학습 데이터 크기 (Rolling Window를 위해 고정)
-        # Start Index는 0에서 시작
         current_train_start_idx = 0
         current_train_end_idx = train_end_idx
-        
-        final_model = None
+        total_folds = num_valid + 1
+
+        print(f"🚀 Starting Target-Centric Training (Corrected Logic)")
 
         for i in range(total_folds):
-            is_test_fold = (i == num_valid) # 마지막 루프는 Test Fold
-            
-            # 1. 구간 설정
+            is_test_fold = (i == num_valid)
             window_size = test_window_days if is_test_fold else valid_window_days
-            
-            # 검증/테스트 구간의 끝 인덱스
             eval_end_idx = current_train_end_idx + window_size
             
             if eval_end_idx > len(all_dates):
-                raise ValueError(f"데이터 부족: Fold {i+1}을 위한 데이터가 모자랍니다.")
+                break
             
-            # 날짜 기준으로 데이터 슬라이싱
             train_dates = all_dates[current_train_start_idx : current_train_end_idx]
             eval_dates = all_dates[current_train_end_idx : eval_end_idx]
             
-            train_df = df[df[self.date_col].isin(train_dates)]
-            eval_df = df[df[self.date_col].isin(eval_dates)]
-            
             fold_name = "TEST" if is_test_fold else f"Valid-{i+1}"
-            print(f"\n[Fold {i+1}/{total_folds}] {fold_name}")
+            print(f"\n[Fold {i+1}] {fold_name} ({len(train_dates)} train days, {len(eval_dates)} eval days)")
 
-            # .date() 에러 해결을 위해 pd.Timestamp로 변환 후 출력
-            t_start = pd.Timestamp(train_dates[0]).date()
-            t_end = pd.Timestamp(train_dates[-1]).date()
-            e_start = pd.Timestamp(eval_dates[0]).date()
-            e_end = pd.Timestamp(eval_dates[-1]).date()
-            
-            print(f"   Train: {t_start} ~ {t_end} ({len(train_df):,} rows)")
-            print(f"   Eval : {e_start} ~ {e_end} ({len(eval_df):,} rows)")
-            
-            # 2. 모델 재설정 (이전 학습 상태 초기화)
-            # 주의: model 객체가 stateful하다면 reset하거나 새로 생성해야 함.
-            # LightGBMModel은 fit 호출 시 보통 내부 부스터를 새로 만듭니다.
-            # 더 확실하게 하기 위해 fit 내에서 부스터가 초기화되는지 확인 필요.
-            # 여기서는 모델 인스턴스는 유지하되 fit으로 덮어쓰기 합니다.
-            
-            # 3. 학습
-            # Valid Fold인 경우: eval_set을 사용하여 early stopping 가능
-            # Test Fold인 경우: Test set을 eval_set으로 쓰면 data leakage는 아니지만(미래 데이터 X),
-            # 보통 Test시에는 Full Train 후 예측만 수행. 하지만 일관성을 위해 여기선 eval_set 사용.
-            
-            self.model.fit(
-                train_df[self.feature_cols],
-                train_df[self.target_col],
-                eval_set=[(eval_df[self.feature_cols], eval_df[self.target_col])],
-                **fit_kwargs
-            )
-            
-            # 4. 평가 및 기록
-            metrics = self._evaluate(eval_df)
+            # [핵심 수정] Horizon 별로 "전체 데이터 시프트 -> 슬라이싱" 수행
+            for h_idx, col in enumerate(target_cols, 1):
+                # 1. 필요한 컬럼만으로 작업용 DF 생성 (메모리 최적화)
+                #    전체 기간에 대해 Shift를 수행해야 슬라이싱 경계면의 데이터를 살릴 수 있음
+                work_cols = [self.date_col, 'ticker', col] + self.feature_cols
+                temp_df = df_run[work_cols].copy()
+                
+                # 2. 피처 시프트 (전체 데이터 대상)
+                for f in self.feature_cols:
+                    temp_df[f] = temp_df.groupby('ticker')[f].shift(h_idx)
+                
+                # 3. 날짜 기준으로 슬라이싱
+                train_df = temp_df[temp_df[self.date_col].isin(train_dates)]
+                eval_df = temp_df[temp_df[self.date_col].isin(eval_dates)]
+                
+                # 4. 결측 제거 (이제 경계면 데이터는 보존되고, 진짜 결측만 제거됨)
+                train_df = train_df.dropna()
+                eval_df = eval_df.dropna()
+
+                # 5. 모델 학습 (해당 Horizon만)
+                self.model.fit(
+                    train_df[self.feature_cols],
+                    train_df[[col]], # DataFrame 형태로 전달
+                    eval_set=[(eval_df[self.feature_cols], eval_df[[col]])],
+                    **fit_kwargs
+                )
+
+            # 평가 및 예측
+            metrics = self._evaluate(df_run, eval_dates, target_cols)
             
             if is_test_fold:
                 test_metrics = metrics
-                test_predictions = self._predict_with_metadata(eval_df)
-                final_model = self.model # 마지막 모델 저장
-                print(f"   ✅ {fold_name} RMSE: {metrics['rmse']:.6f}")
+                test_predictions = self._predict_with_metadata(df_run, eval_dates, target_cols)
+                final_model = copy.deepcopy(self.model)
+                print(f"   ✅ {fold_name} RMSE: {metrics['avg_rmse']:.6f}")
             else:
                 valid_metrics_history.append(metrics)
-                print(f"   ✅ {fold_name} RMSE: {metrics['rmse']:.6f}")
+                print(f"   ✅ {fold_name} RMSE: {metrics['avg_rmse']:.6f}")
             
-            # 5. 다음 Fold를 위해 윈도우 슬라이딩 (Rolling Window)
-            # 학습 시작일과 종료일을 모두 Window 크기만큼 뒤로 밈
-            # 단, Test Fold 직전에는 Test Window가 아니라 Valid Window만큼 밀어야 자연스러운 연속성 유지
-            # 사용자의 의도: "검증 단계가 올라갈 때마다 검증 단위 기간만큼 슬라이드"
-            
+            # 윈도우 이동
             shift_step = valid_window_days
             current_train_start_idx += shift_step
             current_train_end_idx += shift_step
-            
+
         return {
-            'train_metrics': self._evaluate(train_df), # 마지막 Fold의 Train metrics
             'valid_metrics': valid_metrics_history,
             'test_metrics': test_metrics,
             'test_predictions': test_predictions,
-            'final_model': final_model # 저장용
+            'final_model': final_model
         }
 
-    def _evaluate(self, df: pd.DataFrame) -> Dict[str, float]:
-        y_true = df[self.target_col].values
-        y_pred = self.model.predict(df[self.feature_cols]).values
+    def _evaluate(self, df_run, eval_dates, target_cols) -> Dict[str, float]:
+        rmses = []
+        # 평가 시에도 Shift-then-Slice 로직 적용
+        cols_needed = [self.date_col, 'ticker'] + self.feature_cols + target_cols
+        base_df = df_run[cols_needed].copy() # 전체 데이터 복사본 (피처 원본)
         
-        # 결측 제거
-        mask = ~(np.isnan(y_true) | np.isnan(y_pred))
-        y_true, y_pred = y_true[mask], y_pred[mask]
-        
-        if len(y_true) == 0: return {'rmse': np.nan, 'r2': np.nan}
-        
-        rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-        ss_res = np.sum((y_true - y_pred) ** 2)
-        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else np.nan
-        
-        return {'rmse': rmse, 'r2': r2, 'samples': len(y_true)}
+        for h_idx, col in enumerate(target_cols, 1):
+            temp_df = base_df.copy()
+            for f in self.feature_cols:
+                temp_df[f] = temp_df.groupby('ticker')[f].shift(h_idx)
+            
+            # 슬라이싱 & Dropna
+            eval_df = temp_df[temp_df[self.date_col].isin(eval_dates)].dropna(subset=self.feature_cols + [col])
+            
+            if len(eval_df) == 0: continue
+            
+            y_true = eval_df[col].values
+            # target_name을 사용하여 해당 Horizon 모델로만 예측
+            y_pred = self.model.predict(eval_df[self.feature_cols], target_name=col).values
+            
+            rmses.append(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+            
+        return {'avg_rmse': np.mean(rmses) if rmses else np.nan, 'samples': len(eval_dates)}
 
-    def _predict_with_metadata(self, df: pd.DataFrame) -> pd.DataFrame:
-        result = df[[self.date_col, 'ticker']].copy()
-        result['y_true'] = df[self.target_col].values
-        result['y_pred'] = self.model.predict(df[self.feature_cols]).values
+    def _predict_with_metadata(self, df_run, eval_dates, target_cols) -> pd.DataFrame:
+        # 결과용 뼈대: 평가 날짜의 원본 데이터
+        eval_base = df_run[df_run[self.date_col].isin(eval_dates)].copy()
+        result = eval_base[[self.date_col, 'ticker', self.base_price_col]].copy()
+        
+        # 예측용 전체 데이터 준비
+        cols_needed = [self.date_col, 'ticker'] + self.feature_cols
+        full_base = df_run[cols_needed].copy()
+        
+        for h_idx, col in enumerate(target_cols, 1):
+            # 전체 데이터 시프트
+            temp_full = full_base.copy()
+            for f in self.feature_cols:
+                temp_full[f] = temp_full.groupby('ticker')[f].shift(h_idx)
+            
+            # 평가 구간 슬라이싱 (Dropna 하지 않음 -> 결측이면 NaN으로 남겨서 예측 시도 or 채움)
+            # 여기서는 dropna를 하면 행이 사라져서 result와 인덱스 매칭이 깨짐.
+            # 하지만 shift로 인해 앞부분이 NaN이면 예측 불가.
+            # -> lightgbm은 NaN 예측 가능. 따라서 dropna 없이 진행.
+            eval_slice = temp_full[temp_full[self.date_col].isin(eval_dates)]
+            
+            # 인덱스 정렬 보장
+            # eval_slice와 result는 같은 날짜/종목 순서여야 함 (sort_values 되어 있다고 가정)
+            
+            preds = self.model.predict(eval_slice[self.feature_cols], target_name=col)
+            
+            # 결과 할당 (Index alignment)
+            result[f'pred_{col}'] = preds.values
+            result[f'true_{col}'] = eval_base[col].values if col in eval_base else np.log(result[self.base_price_col])
+
         return result

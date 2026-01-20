@@ -1,28 +1,35 @@
 """
 Purpose:
-    - LightGBM 기반 1차 예측 모델 구현체 (Enhanced)
-    - ModelBase 인터페이스 구현
-    - Categorical Feature (ticker) 지원 추가
-    - 전체 통합 데이터셋 학습 가능
+    - LightGBM 기반 Multi-output 예측 모델 구현체 (Refactored)
+    - 단일 시점(Scalar) 및 다중 시점(Vector) 예측을 모두 지원
+    - ModelBase 인터페이스 준수
+    - 내부적으로 Target 컬럼별 개별 Booster를 관리하는 'Chained Regression' 방식 적용
 
 Design notes:
-    - 시계열 split / walk-forward 로직은 trainer에서 담당
-    - 이 클래스는 "한 번의 학습/예측"에만 집중
+    - fit(): y가 DataFrame(다중 컬럼)일 경우, 컬럼별로 루프를 돌며 개별 모델을 학습
+    - predict(): 학습된 모든 모델의 예측값을 모아 DataFrame으로 반환
+    - save/load: 여러 개의 Booster 객체를 리스트/딕셔너리 형태로 직렬화
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Union
 import pandas as pd
+import numpy as np
 import lightgbm as lgb
 import pickle
+from tqdm import tqdm
 
 from src.models.base import ModelBase
 
 
 class LightGBMModel(ModelBase):
     """
-    LightGBM 회귀 모델 래퍼 (Categorical Feature 지원)
+    LightGBM Multi-output 회귀 모델 래퍼
+    
+    특징:
+    - y로 Series(단일)가 들어오면 기존처럼 동작
+    - y로 DataFrame(다중)이 들어오면 컬럼 수만큼 모델을 생성 (Multi-output)
     """
 
     def __init__(
@@ -33,13 +40,17 @@ class LightGBMModel(ModelBase):
         categorical_features: Optional[List[str]] = None,
         task: str = "regression",
     ):
-        super().__init__(model_name="lightgbm", model_version=model_version)
+        super().__init__(model_name="lightgbm_multi", model_version=model_version)
 
         self.params = params
         self.feature_list = feature_list
         self.categorical_features = categorical_features or []
         self.task = task
-        self.model: Optional[lgb.Booster] = None
+        
+        # [변경] 단일 모델 대신 여러 모델을 관리하기 위한 컨테이너
+        # Key: Target 컬럼명, Value: 학습된 lgb.Booster 객체
+        self.models: Dict[str, lgb.Booster] = {}
+        self.target_columns: List[str] = []
 
     # ------------------------------------------------------------------
     # Core lifecycle
@@ -48,76 +59,87 @@ class LightGBMModel(ModelBase):
     def fit(
         self, 
         X: pd.DataFrame, 
-        y: pd.Series, 
+        y: Union[pd.Series, pd.DataFrame], 
         eval_set: Optional[List[tuple]] = None,
+        verbose: bool = False,
         **kwargs
     ) -> None:
         """
-        LightGBM 학습
+        LightGBM 학습 (Multi-output 지원)
 
         Parameters
         ----------
         X : DataFrame
-            feature matrix (feature_list 기준)
-        y : Series
-            target
+            feature matrix
+        y : Series or DataFrame
+            target vector(s). 
+            DataFrame일 경우 컬럼 개수만큼 모델이 학습됨 (예: t+1 ~ t+5)
         eval_set : List[tuple], optional
-            검증 세트 [(X_valid, y_valid), ...]
-        **kwargs : dict
-            lgb.train()에 전달할 추가 인자
-            - num_boost_round
-            - callbacks
-            - categorical_feature 등
+            [(X_valid, y_valid), ...]
+            y_valid 역시 y와 동일한 형태여야 함
         """
-        # Categorical feature 인덱스 변환
-        cat_indices = []
-        if self.categorical_features:
-            cat_indices = [
-                i for i, col in enumerate(self.feature_list) 
-                if col in self.categorical_features
-            ]
-
-        # Train Dataset 생성
-        train_data = lgb.Dataset(
-            X[self.feature_list], 
-            label=y,
-            categorical_feature=cat_indices if cat_indices else 'auto'
-        )
-
-        # Valid Datasets 준비
-        valid_sets = [train_data]
-        valid_names = ['train']
+        # 1. Target 포맷 표준화 (Series -> DataFrame)
+        if isinstance(y, pd.Series):
+            y = y.to_frame()
         
-        if eval_set:
-            for i, (X_valid, y_valid) in enumerate(eval_set, 1):
-                valid_data = lgb.Dataset(
-                    X_valid[self.feature_list],
-                    label=y_valid,
-                    reference=train_data,
-                    categorical_feature=cat_indices if cat_indices else 'auto'
-                )
-                valid_sets.append(valid_data)
-                valid_names.append(f'valid{i}')
+        new_targets = [c for c in y.columns if c not in self.target_columns]
+        self.target_columns.extend(new_targets)
+        
+        cat_indices = [i for i, c in enumerate(self.feature_list) if c in self.categorical_features]
+        cat_arg = cat_indices if cat_indices else 'auto'
 
-        # 학습
-        self.model = lgb.train(
-            params=self.params,
-            train_set=train_data,
-            valid_sets=valid_sets,
-            valid_names=valid_names,
-            **kwargs,
-        )
+        loop_targets = y.columns
+        if len(loop_targets) > 1:
+            loop_targets = tqdm(loop_targets, desc="Training Multi-output")
+
+        for col in loop_targets:
+            y_col = y[col]
+            train_ds = lgb.Dataset(X[self.feature_list], label=y_col, categorical_feature=cat_arg)
+            
+            valid_sets = [train_ds]
+            valid_names = ['train']
+            
+            if eval_set:
+                for i, (X_val, y_val) in enumerate(eval_set, 1):
+                    # y_val에서 해당 컬럼 추출
+                    y_val_c = y_val[col] if isinstance(y_val, pd.DataFrame) else y_val
+                    valid_ds = lgb.Dataset(X_val[self.feature_list], label=y_val_c, reference=train_ds, categorical_feature=cat_arg)
+                    valid_sets.append(valid_ds)
+                    valid_names.append(f'valid{i}')
+
+            booster = lgb.train(
+                params=self.params,
+                train_set=train_ds,
+                valid_sets=valid_sets,
+                valid_names=valid_names,
+                **kwargs,
+            )
+            
+            self.models[col] = booster
 
         self.is_fitted = True
 
-    def predict(self, X: pd.DataFrame, **kwargs) -> pd.Series:
+    def predict(self, X: pd.DataFrame, target_name: Optional[str] = None, **kwargs) -> Union[pd.DataFrame, pd.Series]:
         """
-        예측 수행
+        target_name을 지정하면 해당 Horizon만 예측하여 Series 반환 (효율성)
+        지정하지 않으면 모든 Horizon을 예측하여 DataFrame 반환
         """
         self.validate_fitted()
+        
+        # 1. 단일 타깃 예측 (Trainer의 루프 최적화용)
+        if target_name:
+            if target_name not in self.models:
+                raise ValueError(f"Model for target '{target_name}' not found.")
+            
+            pred = self.models[target_name].predict(X[self.feature_list], **kwargs)
+            return pd.Series(pred, index=X.index, name=target_name)
 
-        preds = self.model.predict(X[self.feature_list], **kwargs)
-        return pd.Series(preds, index=X.index, name="prediction")
+        # 2. 전체 타깃 예측
+        results = {}
+        for col, booster in self.models.items():
+            results[col] = booster.predict(X[self.feature_list], **kwargs)
+            
+        return pd.DataFrame(results, index=X.index)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -126,11 +148,13 @@ class LightGBMModel(ModelBase):
     def save(self, path: str) -> None:
         """
         모델 저장 (pickle)
+        - 여러 개의 booster를 딕셔너리 형태로 저장
         """
         with open(path, "wb") as f:
             pickle.dump(
                 {
-                    "model": self.model,
+                    "models": self.models,  # [변경] 단일 model -> models dict
+                    "target_columns": self.target_columns,
                     "params": self.params,
                     "feature_list": self.feature_list,
                     "categorical_features": self.categorical_features,
@@ -155,9 +179,17 @@ class LightGBMModel(ModelBase):
             categorical_features=obj.get("categorical_features", []),
             task=obj.get("task", "regression"),
         )
-        inst.model = obj["model"]
-        inst.is_fitted = True
+        
+        # [변경] models 복원
+        inst.models = obj["models"]
+        inst.target_columns = obj.get("target_columns", [])
+        
+        # 구버전 호환성 (단일 모델 파일인 경우)
+        if "model" in obj and not inst.models:
+            inst.models = {"single_output": obj["model"]}
+            inst.target_columns = ["single_output"]
 
+        inst.is_fitted = True
         return inst
 
     # ------------------------------------------------------------------
@@ -167,6 +199,8 @@ class LightGBMModel(ModelBase):
     def get_meta(self) -> Dict[str, Any]:
         """
         모델 메타데이터 반환
+        - Feature Importance는 첫 번째 모델(가장 가까운 시점)을 기준으로 하거나, 평균을 낼 수 있음
+        - 여기서는 '평균 Importance'를 제공
         """
         meta = {
             "model_name": self.model_name,
@@ -175,46 +209,19 @@ class LightGBMModel(ModelBase):
             "feature_list": self.feature_list,
             "categorical_features": self.categorical_features,
             "hyperparameters": self.params,
+            "target_columns": self.target_columns,
+            "num_outputs": len(self.models)
         }
         
-        # Feature Importance 추가 (학습 후)
-        if self.is_fitted and self.model:
-            importance = self.model.feature_importance(importance_type='gain')
-            meta["feature_importance"] = dict(zip(self.feature_list, importance))
+        # Feature Importance 집계 (모든 Horizon 모델의 평균)
+        if self.is_fitted and self.models:
+            importances = []
+            for booster in self.models.values():
+                imp = booster.feature_importance(importance_type='gain')
+                importances.append(imp)
+            
+            # 평균 계산
+            avg_imp = np.mean(importances, axis=0)
+            meta["feature_importance"] = dict(zip(self.feature_list, avg_imp))
         
         return meta
-
-
-# ----------------------------------------------------------------------
-# Usage example (documentation only)
-# ----------------------------------------------------------------------
-"""
-from src.models.lightgbm_model import LightGBMModel
-
-# 전체 통합 모델 (ticker를 categorical feature로)
-model = LightGBMModel(
-    model_version="v1_unified",
-    params={
-        "objective": "regression",
-        "learning_rate": 0.05,
-        "num_leaves": 31,
-    },
-    feature_list=["feature_ma_5", "feature_rsi_14", "ticker"],
-    categorical_features=["ticker"]  # 종목 코드
-)
-
-# 학습
-model.fit(
-    X_train, 
-    y_train,
-    eval_set=[(X_valid, y_valid)],
-    num_boost_round=1000,
-    callbacks=[lgb.early_stopping(50)]
-)
-
-# 예측
-scores = model.predict(X_test)
-
-# 저장
-model.save("models/unified_model.pkl")
-"""

@@ -1,14 +1,14 @@
 # SignalWeaver 프로젝트 공통 설정
 project:
   name: "SignalWeaver"
-  reference_date: "20260116"
+  reference_date: "20260120"
 
 # 01_collect_data 관련 설정
 data_collection:
-  start_date: "20221021"
-  end_date: "20260116"
-  save_csv: True        # CSV 저장 활성화 (사람용)
-  save_parquet: True    # Parquet 저장 활성화 (기계용)
+  start_date: "20221019"
+  end_date: "20260120"
+  save_csv: True
+  save_parquet: True
   min_sleep: 0.05
   max_sleep: 0.8
 
@@ -18,16 +18,23 @@ preprocessing:
   technical_windows: [5, 20, 60]
   volume_window: 20
   rsi_period: 14
-  save_csv: True        # CSV 저장 활성화 (사람용)
-  save_parquet: True    # Parquet 저장 활성화 (기계용)
+  save_csv: True
+  save_parquet: True
 
-# 03_train_predict 관련 설정
+# 03_train_predict 관련 설정 (Multi-Horizon Update)
 training:
-  train_end: "2025-01-15"
+  train_end: "2025-01-22"
+  
+  # Multi-horizon 설정
   valid_window_days: 60
-  test_window_days: 63
-  num_valid: 3
-  target_col: "target_log_close"
+  test_window_days: 60
+  num_valid: 3       # Walk-forward 검증 횟수
+  base_price_col: "close"
+  
+  # 다중 출력 타깃 설정 (Chunk size: 5)
+  target_columns: ["h1", "h2", "h3", "h4", "h5"]
+  
+  # MultiOutputRegressor용 파라미터
   lgbm_params:
     objective: "regression"
     metric: "rmse"
@@ -37,8 +44,9 @@ training:
     feature_fraction: 0.8
     bagging_fraction: 0.8
     bagging_freq: 5
-    verbose: -1
     random_state: 42
+    n_jobs: -1       # 병렬 처리
+    verbose: -1      # 로그 끄기
 
 # 경로 설정
 paths:
