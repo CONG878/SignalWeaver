@@ -1,4 +1,4 @@
-# 📄 Data Schema Definition (v3.0.0)
+﻿# 📄 Data Schema Definition (v3.1.1)
 
 본 스키마는 SignalWeaver 프로젝트의 데이터 계약을 정의합니다.
 
@@ -8,10 +8,24 @@
 
 | 속성 | 값 |
 |------|-----|
-| **Schema Version** | `3.0.0` |
-| **Last Updated** | 2026-01-18 |
-| **Breaking Changes** | Target 생성 위치 변경, Feature Shift 도입 |
-| **Compatibility** | v2.x와 일부 호환 (마이그레이션 필요) |
+| **Schema Version** | `3.1.1` |
+| **Last Updated** | 2026-01-21 |
+| **Breaking Changes** | Multi-horizon 예측 지원, Target 생성 위치 재변경 (03→02) |
+| **Compatibility** | v3.0.x와 부분 호환 (타깃 컬럼명 변경) |
+
+---
+
+## 🔄 최근 변경 이력 요약
+
+### v3.1.1 (2026-01-21) - PATCH
+- **Target 생성 위치 재변경**: 03단계 → **02단계로 복귀**
+- **이유**: 전처리와 학습 로직의 명확한 분리, 재현성 향상
+- **영향**: 02단계 출력에 `target_log_close` 컬럼 포함됨
+
+### v3.1.0 (2026-01-21) - MINOR
+- **Multi-horizon 예측 지원**: 단일 시점 예측 → 5일치(Chunk) 예측
+- **새로운 타깃 컬럼**: `target_log_close_h1` ~ `target_log_close_h5`
+- **Trainer 로직 개선**: Target-Centric Alignment 방식 도입
 
 ---
 
@@ -36,7 +50,7 @@ data/01_raw/{YYYYMMDD}/
 
 # 02단계: Feature 데이터셋
 data/02_processed/{YYYYMMDD}/
-  ├── dataset.parquet                       # 통합 Feature 데이터셋
+  ├── dataset.parquet                       # 통합 Feature 데이터셋 (Target 포함)
   └── csv/{종목명}.csv                      # 개별 CSV (옵션)
 
 # 03단계: 모델 산출물
@@ -70,7 +84,7 @@ data/04_models/{YYYYMMDD}/
 | `change_pct` | float | 등락률 (%, API 제공) | ⚠️ |
 
 **⚠️ 주의사항**:
-- `change_pct`는 FinanceDataReader API가 제공하는 값 (우리가 계산한 것 아님)
+- `change_pct`는 FinanceDataReader API가 제공하는 값
 - **01단계**에서는 API가 주는 모든 컬럼을 보존
 - **02단계** 이후에는 우리가 계산한 Feature만 추가
 
@@ -136,50 +150,104 @@ data/04_models/{YYYYMMDD}/
 
 ## 📌 5. Target (타겟) 스키마
 
-### ⚠️ 중요 변경 사항 (v3.0.0)
+### ⚠️ 중요 변경 사항 (v3.1.1)
 
-#### Target 생성 시점
+#### Target 생성 시점의 변천사
 - **v2.x**: 02단계에서 생성
-- **v3.0.0**: **03단계에서 생성** ← 새로운 규칙
+- **v3.0.0**: 03단계에서 생성 (실험 유연성 목적)
+- **v3.1.1**: **02단계로 복귀** ← **현재 규칙**
 
-#### Target 정의
+#### 복귀 이유
+1. **재현성 보장**: 데이터셋 자체가 학습 준비 완료 상태
+2. **책임 분리**: 전처리(02) vs 학습(03) 명확히 구분
+3. **파이프라인 안정성**: 03단계는 순수하게 모델 학습만 담당
+
+### 5.1 Target 정의
+
 ```python
-# 03단계 (03_train_predict.ipynb)에서 생성
+# 02단계 (02_build_dataset.ipynb)에서 생성
 df['target_log_close'] = np.log(df['close'])
-
-# Feature Shift: t일 행에 t-1일의 피처를 배치
-# 의도: "어제 정보로 오늘 종가 예측"
-for col in feature_cols:
-    df[col] = df.groupby('ticker')[col].shift(1)
 ```
 
-### 5.1 Target 컬럼
+### 5.2 Target 컬럼
 
-| 컬럼명 | 타입 | 설명 |
-|--------|------|------|
-| `target_log_close` | float | 로그 종가 (절대값 예측) |
+| 컬럼명 | 타입 | 설명 | 생성 위치 |
+|--------|------|------|-----------|
+| `target_log_close` | float | 로그 종가 (기준 타깃) | **02단계** |
 
 **특징**:
 - ✅ 절대값 예측 (수익률이 아님)
 - ✅ 종목 간 가격 수준 차이 반영
-- ✅ Shift된 Feature로 학습: t일 feature → t+1일 target
+- ✅ Multi-horizon 학습의 공통 기준점
 
-**생성 위치**: `03_train_predict.ipynb` (학습 직전)
+**생성 위치**: `02_build_dataset.ipynb` (전처리 단계)
 
 ---
 
-## 📌 6. 모델 예측 결과 스키마
+## 📌 6. Multi-Horizon 예측 구조 (v3.1.0+)
 
-### 6.1 LightGBM 예측 결과
+### 6.1 개념
+
+기존의 단일 시점 예측 대신, **한 번의 학습으로 5일치(1주일) 가격을 동시에 예측**합니다.
+
+```
+입력 (t-5일 피처) → 모델 → 출력 (t일 가격 예측)
+입력 (t-4일 피처) → 모델 → 출력 (t일 가격 예측)
+입력 (t-3일 피처) → 모델 → 출력 (t일 가격 예측)
+입력 (t-2일 피처) → 모델 → 출력 (t일 가격 예측)
+입력 (t-1일 피처) → 모델 → 출력 (t일 가격 예측)
+```
+
+### 6.2 Horizon 정의
+
+| Horizon | 의미 | 학습 시 Feature 시점 | 예측 대상 |
+|---------|------|---------------------|-----------|
+| h=1 | 1일 앞 예측 | t-1일 | t일 종가 |
+| h=2 | 2일 앞 예측 | t-2일 | t일 종가 |
+| h=3 | 3일 앞 예측 | t-3일 | t일 종가 |
+| h=4 | 4일 앞 예측 | t-4일 | t일 종가 |
+| h=5 | 5일 앞 예측 | t-5일 | t일 종가 |
+
+### 6.3 Target-Centric Alignment
+
+**핵심 원리**: 예측 결과의 `date` 컬럼이 **실제 예측 대상일**과 일치하도록 데이터를 정렬합니다.
+
+```python
+# Trainer 내부 로직 (src/modeling/trainer.py)
+for h in horizons:
+    # 1. Feature를 과거로 시프트 (h일 전 데이터 사용)
+    for col in feature_cols:
+        temp_df[col] = temp_df.groupby('ticker')[col].shift(h)
+    
+    # 2. Target은 시프트하지 않음 (오늘의 정답)
+    # 3. 날짜 슬라이싱으로 학습/검증 구간 분리
+```
+
+**결과**: 예측 데이터프레임의 `date`가 "언제의 가격을 맞추려 했는가"를 명확히 표현
+
+---
+
+## 📌 7. 모델 예측 결과 스키마
+
+### 7.1 Multi-Horizon 예측 출력
 
 | 컬럼명 | 설명 |
 |--------|------|
-| `date` | 예측 기준일 |
+| `date` | 예측 대상 날짜 (타깃 시점) |
 | `ticker` | 종목 코드 |
-| `y_true` | 실제 로그 종가 |
-| `y_pred` | 예측 로그 종가 |
-| `real_price` | 실제 종가 (원화) |
-| `pred_price` | 예측 종가 (exp(y_pred)) |
+| `close` | 실제 종가 (원화) |
+| `target_log_close` | 실제 로그 종가 (공통 정답) |
+| `pred_target_log_close_h1` | h=1 예측값 (로그) |
+| `pred_target_log_close_h2` | h=2 예측값 (로그) |
+| ... | ... |
+| `pred_target_log_close_h5` | h=5 예측값 (로그) |
+| `true_target_log_close_h1` | h=1 정답값 (참조용) |
+| ... | ... |
+
+**특징**:
+- 각 행의 `date`는 예측 대상 시점
+- 동일한 날짜에 대해 5가지 시차의 예측값이 존재
+- 로그 가격 예측값은 `np.exp()`로 실제 가격 변환 가능
 
 **저장 위치**:
 - 통합: `data/03_results/{ref_date}/predictions.parquet`
@@ -187,9 +255,9 @@ for col in feature_cols:
 
 ---
 
-## 📌 7. 단계별 데이터 흐름
+## 📌 8. 단계별 데이터 흐름
 
-### 7.1 단계별 책임 분리
+### 8.1 단계별 책임 분리 (Updated)
 
 ```mermaid
 graph LR
@@ -205,13 +273,13 @@ graph LR
     classDef step3 fill:#f3e5f5
 ```
 
-| 단계 | 입력 | 처리 | 출력 | Target |
-|------|------|------|------|--------|
+| 단계 | 입력 | 처리 | 출력 | Target 생성 |
+|------|------|------|------|-------------|
 | **01** | - | API 수집 | Raw OHLCV | ❌ |
-| **02** | Raw OHLCV | Feature 계산 | Feature + Meta | ❌ |
-| **03** | Feature + Meta | Target 생성 + 학습 | 모델 + 예측 | ✅ |
+| **02** | Raw OHLCV | Feature 계산 + **Target 생성** | Feature + Meta + Target | ✅ |
+| **03** | Feature + Target | **Multi-horizon 학습** + 예측 | 모델 + 예측 | ❌ (사용만) |
 
-### 7.2 데이터 변환 과정
+### 8.2 데이터 변환 과정 (Updated)
 
 ```
 [01단계]
@@ -220,113 +288,117 @@ ticker, date, open, high, low, close, volume
 [02단계]
 + feature_ma_5, feature_rsi_14, ...
 + liquidity_score, risk_composite, ...
++ target_log_close (새로 추가됨)
 - 초기 60일 제거 (warmup)
 ↓
 [03단계]
-+ target_log_close
-+ Feature Shift (t → t-1)
+각 Horizon별로:
+  - Feature를 h일 과거로 Shift
+  - Target은 고정 (오늘의 정답)
+  - Shift-then-Slice 방식으로 경계면 데이터 손실 방지
 ↓
-학습 데이터 완성
+Multi-horizon 학습 데이터 완성
 ```
 
 ---
 
-## 📌 8. 스키마 버전 관리 정책
+## 📌 9. 스키마 버전 관리 정책
 
 ### Semantic Versioning
 
 ```
 schema_version: "MAJOR.MINOR.PATCH"
 
-예: "3.0.0"
-    │  │  └─ PATCH: 문서 업데이트, 주석 추가
-    │  └──── MINOR: Feature 추가 (하위 호환)
-    └─────── MAJOR: Target 생성 위치 변경 등 (하위 호환 X)
+예: "3.1.1"
+    │  │  └─ PATCH: Target 생성 위치 재변경 (03→02)
+    │  └──── MINOR: Multi-horizon 예측 지원
+    └─────── MAJOR: 근본적 데이터 구조 변경 (v2→v3: Feature prefix 등)
 ```
 
 ### 버전별 변경 이력
 
 | Version | Date | Type | 주요 변경 사항 |
 |---------|------|------|----------------|
+| **3.1.1** | 2026-01-21 | 🔵 PATCH | Target 생성 위치 재변경 (03→02), 재현성 향상 |
+| **3.1.0** | 2026-01-21 | 🟢 MINOR | Multi-horizon 예측 지원, Target-Centric Alignment |
 | 3.0.0 | 2026-01-18 | 🔴 MAJOR | Target 생성 위치 변경 (02→03), Feature Shift 도입 |
 | 2.0.0 | 2024-12-28 | 🔴 MAJOR | Feature prefix 통일, Universe Meta 추가 |
 | 1.0.0 | 2024-12-01 | - | Initial release |
 
 ---
 
-## 📌 9. 하위 호환성 & 마이그레이션
+## 📌 10. 마이그레이션 가이드
 
-### v2.x → v3.0.0 마이그레이션
+### v3.0.x → v3.1.1
 
-#### Breaking Change 1: Target 제거
-**v2.x 데이터셋**에 `target_return` 등이 포함되어 있다면:
+#### 변경 사항 1: Target 위치 복귀
+**v3.0.x**: 03단계에서 Target 생성  
+**v3.1.1**: **02단계에서 Target 생성**
 
+**마이그레이션 필요 없음**: 02단계를 다시 실행하면 자동으로 `target_log_close` 포함
+
+#### 변경 사항 2: Multi-Horizon 지원
+**영향**: 03단계 학습 코드 업데이트 필요
+
+**Before (v3.0.x)**:
 ```python
-# 02단계 출력에서 Target 컬럼 제거 (있다면)
-df = pd.read_parquet("data/02_processed/{ref_date}/dataset.parquet")
-target_cols = [c for c in df.columns if c.startswith('target_')]
-if target_cols:
-    df = df.drop(columns=target_cols)
-    df.to_parquet("dataset_v3.parquet")
+# 단일 시점 예측
+model.fit(X_train, y_train['target_log_close'])
+predictions = model.predict(X_test)
 ```
 
-#### Breaking Change 2: Feature Shift 적용
-**03단계**에서 학습 시 반드시 Shift 적용:
-
+**After (v3.1.1)**:
 ```python
-# 필수: Feature Shift (t → t-1)
-for col in feature_cols:
-    df[col] = df.groupby('ticker')[col].shift(1)
-
-# 필수: Shift로 발생한 NaN 제거
-df = df.dropna(subset=feature_cols)
+# Multi-horizon 예측
+model.fit(X_train, y_train[['target_log_close']])
+predictions = model.predict(X_test)  # DataFrame with h1~h5 columns
 ```
 
 ---
 
-## ✔️ 주요 변경 사항 요약 (v3.0.0)
+## ✔️ 주요 변경 사항 요약 (v3.1.1)
 
-### 🔴 Breaking Changes
+### 🔵 PATCH Changes
 
-1. **Target 생성 위치 변경**
-   - v2.x: 02단계에서 생성
-   - v3.0.0: **03단계에서 생성**
-   - 이유: 예측 목표가 실험마다 다를 수 있음
+1. **Target 생성 위치 복귀** (03 → 02)
+   - **이유**: 재현성 보장, 책임 분리 명확화
+   - **영향**: 02단계 출력에 `target_log_close` 포함
+   - **하위 호환**: v3.0.x 사용자는 02단계 재실행 권장
 
-2. **Feature Shift 도입**
-   - 의도: "어제 정보로 오늘 종가 예측"
-   - 구현: `df[col] = df.groupby('ticker')[col].shift(1)`
-   - 영향: 각 종목의 첫 행(NaN) 제거 필요
+### 🟢 MINOR Changes (v3.1.0)
 
-3. **Ticker를 Feature에서 제외**
-   - v2.x: Categorical Feature로 사용 가능
-   - v3.0.0: **Feature로 사용 안 함**
-   - 이유: 신규 종목 예측 불가, 차원 폭발 방지
-   - 대체: `liquidity_score`, `risk_composite` 등 Meta Features
+1. **Multi-Horizon 예측 구조**
+   - 5일치(h1~h5) 동시 예측 지원
+   - Target-Centric Alignment 방식
+   - 예측 결과의 `date`가 실제 예측 대상일과 일치
+
+2. **Shift-then-Slice 패턴**
+   - 전체 데이터를 먼저 시프트한 후 슬라이싱
+   - 경계면 데이터 손실 방지
+   - 학습 효율성 향상
 
 ### ✨ 개선 사항
 
-1. **통합 모델 지향**
-   - 단일 모델로 전체 종목 처리
-   - 종목 간 공통 패턴 학습
-   - 신규 상장 종목 즉시 예측 가능
+1. **파이프라인 안정성**
+   - 02단계: 전처리 + Target 생성 (완결성)
+   - 03단계: 순수 학습 로직 (단순성)
 
-2. **데이터 길이 표준화**
-   - `filter_by_history()` 함수 도입
-   - 종목별 데이터 길이 일치
-   - Batch 학습 효율성 향상
+2. **재현성 강화**
+   - 02단계 출력만으로 학습 재현 가능
+   - 실험 간 데이터셋 일관성 보장
 
 ---
 
 ## 📚 참고 문서
 
-- **변경 이력**: `docs/changelog_schema.md`
+- **변경 이력**: `docs/changelog_schema.md` (업데이트 필요)
 - **Feature 계산**: `src/features/technical.py`
 - **Universe 선정**: `src/universe/select_universe.py`
 - **모델 인터페이스**: `src/models/base.py`
+- **Multi-Horizon Trainer**: `src/modeling/trainer.py`
 
 ---
 
-**Last Updated**: 2026-01-18  
-**Schema Version**: 3.0.0  
+**Last Updated**: 2026-01-21  
+**Schema Version**: 3.1.1  
 **Maintained by**: SignalWeaver Team

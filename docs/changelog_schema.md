@@ -1,4 +1,4 @@
-# Schema Changelog
+﻿# Schema Changelog
 
 All notable changes to the data schema will be documented in this file.
 
@@ -7,11 +7,212 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.1.1] - 2026-01-21
+
+### 🔵 PATCH Changes
+
+#### Target 생성 위치 재변경 (03단계 → 02단계)
+
+**변경 사항**:
+- **v3.0.0**: 03단계(학습 직전)에서 Target 생성
+- **v3.1.0**: 03단계 유지
+- **v3.1.1**: **02단계(전처리)로 복귀** ← 현재
+
+**복귀 이유**:
+1. **재현성 보장**: 02단계 산출물만으로 학습 환경 완전 재현 가능
+2. **책임 분리 명확화**: 
+   - 02단계: 데이터 준비 완료 (Feature + Target)
+   - 03단계: 순수 모델 학습 및 예측
+3. **파이프라인 안정성**: 실험 변경 시 02단계만 재실행하면 일관된 데이터셋 확보
+4. **운영 편의성**: Target이 없는 데이터셋은 불완전하다는 직관에 부합
+
+**구현**:
+```python
+# 02_build_dataset.ipynb (최종 단계)
+df_final['target_log_close'] = np.where(
+    df_final['close'] > 1, 
+    np.log(df_final['close']), 
+    0
+)
+```
+
+**영향**:
+- ✅ **02단계 출력**: `target_log_close` 컬럼 포함
+- ✅ **03단계 입력**: Target이 이미 준비된 상태로 시작
+- ⚠️ **하위 호환**: v3.0.x 사용자는 02단계 재실행 권장 (마이그레이션 불필요)
+
+---
+
+## [3.1.0] - 2026-01-21
+
+### 🟢 MINOR Changes
+
+#### 1. Multi-Horizon 예측 구조 도입
+
+**변경 사항**:
+- **v3.0.x**: 단일 시점(t+1) 예측
+- **v3.1.0**: **5일치(h1~h5) 동시 예측**
+
+**동기**:
+- 실전 운용에서는 원거리 예측(먼 미래) 필요
+- 단일 모델로 여러 시차를 학습하여 효율성 향상
+- Recursive Extension의 기반 제공 (5일 Chunk → 60일 확장)
+
+**구현 개념**:
+```
+t일의 가격을 맞추기 위해:
+- h=1: t-1일 피처 사용
+- h=2: t-2일 피처 사용
+- h=3: t-3일 피처 사용
+- h=4: t-4일 피처 사용
+- h=5: t-5일 피처 사용
+
+→ 5개의 독립된 모델이 동일한 정답(t일 가격)을 예측
+```
+
+**Target 컬럼 (식별자)**:
+```python
+# 모델 내부적으로만 사용 (데이터셋에는 없음)
+model.target_columns = [
+    'target_log_close_h1',
+    'target_log_close_h2',
+    'target_log_close_h3',
+    'target_log_close_h4',
+    'target_log_close_h5'
+]
+```
+
+**예측 결과 컬럼**:
+| 컬럼명 | 설명 |
+|--------|------|
+| `pred_target_log_close_h1` | h=1 예측값 (1일 전 정보로 예측) |
+| `pred_target_log_close_h2` | h=2 예측값 (2일 전 정보로 예측) |
+| ... | ... |
+| `true_target_log_close_h1` | 정답 (참조용, 모든 h에 대해 동일) |
+
+**영향**:
+- ⚠️ **모델 클래스**: `LightGBMModel`이 Multi-output 지원
+- ⚠️ **Trainer 로직**: `WalkForwardTrainer`에 Target-Centric 정렬 구현
+- ✅ **하위 호환**: 기존 단일 예측도 `horizons=[1]`로 지원
+
+---
+
+#### 2. Target-Centric Alignment 패턴
+
+**변경 사항**:
+- 예측 결과의 `date` 컬럼이 **실제 예측 대상일**과 일치하도록 데이터 정렬
+
+**Before (Feature-Centric)**:
+```
+date       | feature_ma_5 | target
+2026-01-15 | 100          | 102  (다음날 가격)
+2026-01-16 | 101          | 103
+```
+→ "이 날짜의 피처로 다음 날을 예측"
+
+**After (Target-Centric)**:
+```
+date       | feature_ma_5 (shifted) | target
+2026-01-16 | 100 (전날값)           | 102  (이 날의 정답)
+2026-01-17 | 101 (전날값)           | 103  (이 날의 정답)
+```
+→ "이 날짜의 가격을 예측 대상으로 삼음"
+
+**장점**:
+- ✅ 예측 결과 해석 직관성 향상 ("2026-01-17의 예측값")
+- ✅ 백테스트 로직 단순화 (날짜 매칭 혼란 제거)
+- ✅ 운영 환경과 동일한 시간 개념
+
+**구현 (Trainer 내부)**:
+```python
+# Shift-then-Slice 패턴
+for h in horizons:
+    # 1. 전체 데이터를 먼저 시프트
+    for col in feature_cols:
+        temp_df[col] = temp_df.groupby('ticker')[col].shift(h)
+    
+    # 2. 시프트 후 날짜로 슬라이싱
+    train_df = temp_df[temp_df['date'].isin(train_dates)].dropna()
+    
+    # 3. Target은 시프트하지 않음 (오늘의 정답)
+    model.fit(train_df[feature_cols], train_df['target_log_close'])
+```
+
+**영향**:
+- ⚠️ **Trainer 로직**: `src/modeling/trainer.py` 전면 개편
+- ✅ **데이터셋 구조**: 변경 없음 (Trainer가 런타임에 처리)
+- ✅ **예측 결과**: `date` 컬럼 의미 변경 (타깃 시점)
+
+---
+
+#### 3. Shift-then-Slice 패턴
+
+**변경 사항**:
+- 기존: 슬라이싱 후 시프트 → 경계면 데이터 손실
+- 개선: **시프트 후 슬라이싱** → 데이터 손실 방지
+
+**Before (Slice-then-Shift)**:
+```python
+train_df = df[df['date'].isin(train_dates)]  # 먼저 자름
+train_df['feature'] = train_df['feature'].shift(1)  # 첫 행 NaN 발생
+```
+→ 학습 구간의 첫 날짜 데이터 손실
+
+**After (Shift-then-Slice)**:
+```python
+df_shifted = df.copy()
+df_shifted['feature'] = df_shifted.groupby('ticker')['feature'].shift(1)
+train_df = df_shifted[df_shifted['date'].isin(train_dates)].dropna()
+```
+→ 시프트된 값이 이미 준비된 상태로 슬라이싱
+
+**장점**:
+- ✅ Walk-Forward 각 Fold의 유효 데이터 최대화
+- ✅ 경계 구간 예측 품질 향상
+
+---
+
+### 📚 Documentation
+
+#### Multi-Horizon 예측 가이드
+
+**설정 (config.yaml)**:
+```yaml
+training:
+  horizons: [1, 2, 3, 4, 5]  # 5일치 동시 예측
+  target_col_name: "target_log_close"
+```
+
+**사용 예시**:
+```python
+# 모델 초기화
+model = LightGBMModel(
+    model_version="v3.1",
+    params=lgbm_params,
+    feature_list=feature_cols
+)
+
+# Trainer 실행 (자동으로 Multi-horizon 학습)
+trainer = WalkForwardTrainer(
+    model=model,
+    horizons=[1, 2, 3, 4, 5],
+    target_col_name='target_log_close'
+)
+
+results = trainer.run(df, ...)
+
+# 예측 결과
+predictions = results['test_predictions']
+# 컬럼: date, ticker, pred_target_log_close_h1, ..., pred_target_log_close_h5
+```
+
+---
+
 ## [3.0.0] - 2026-01-18
 
 ### 🔴 Breaking Changes
 
-#### 1. Target 생성 위치 변경
+#### 1. Target 생성 위치 변경 (v2.x에서)
 **변경 사항**:
 - **v2.x**: 02단계에서 `target_return`, `target_log_return` 생성
 - **v3.0.0**: **03단계**에서 `target_log_close` 생성
@@ -297,6 +498,69 @@ df = df.rename(columns=rename_map)
 
 ## Migration Guides
 
+### v3.1.0 → v3.1.1 (PATCH)
+
+#### Target 위치 변경 처리
+
+**자동 마이그레이션**: 02단계 재실행하면 자동으로 Target 포함됨
+
+```bash
+# 02단계 재실행
+jupyter nbconvert --execute 02_build_dataset.ipynb
+
+# 결과: data/02_processed/{date}/dataset.parquet에 target_log_close 포함
+```
+
+**수동 마이그레이션** (v3.1.0 데이터셋이 있는 경우):
+```python
+import pandas as pd
+import numpy as np
+
+# v3.1.0 데이터셋 로드 (Target 없음)
+df = pd.read_parquet("data/02_processed/{date}/dataset.parquet")
+
+# Target 추가
+df['target_log_close'] = np.where(df['close'] > 1, np.log(df['close']), 0)
+
+# 저장
+df.to_parquet("dataset_v3.1.1.parquet", index=False)
+```
+
+---
+
+### v3.0.x → v3.1.0 (MINOR)
+
+#### Step 1: 코드 업데이트
+
+**config.yaml**:
+```yaml
+training:
+  horizons: [1, 2, 3, 4, 5]  # 추가
+  target_col_name: "target_log_close"  # 추가
+```
+
+**03_train_predict.ipynb**:
+```python
+# Before (v3.0.x)
+model = LightGBMModel(...)
+model.fit(X_train, y_train)
+
+# After (v3.1.0)
+model = LightGBMModel(...)
+trainer = WalkForwardTrainer(
+    model=model,
+    horizons=[1, 2, 3, 4, 5],  # Multi-horizon 설정
+    target_col_name='target_log_close'
+)
+results = trainer.run(df, ...)
+```
+
+#### Step 2: 데이터셋 확인
+
+v3.0.x 데이터셋은 v3.1.0과 호환됩니다. 추가 작업 불필요.
+
+---
+
 ### v2.x → v3.0.0 (MAJOR)
 
 #### Step 1: 02단계 데이터 정리
@@ -372,7 +636,9 @@ df = df.rename(columns=feature_renames)
 
 | Version | Date | Type | Key Changes |
 |---------|------|------|-------------|
-| **3.0.0** | 2026-01-18 | 🔴 MAJOR | Target 생성 위치 변경, Feature Shift, Ticker 제외 |
+| **3.1.1** | 2026-01-21 | 🔵 PATCH | Target 생성 위치 재변경 (03→02), 재현성 강화 |
+| **3.1.0** | 2026-01-21 | 🟢 MINOR | Multi-horizon 예측, Target-Centric Alignment |
+| 3.0.0 | 2026-01-18 | 🔴 MAJOR | Target 생성 위치 변경, Feature Shift, Ticker 제외 |
 | 2.0.0 | 2024-12-28 | 🔴 MAJOR | Feature prefix 통일, Universe Meta 추가 |
 | 1.0.0 | 2024-12-01 | - | Initial release |
 
@@ -380,28 +646,35 @@ df = df.rename(columns=feature_renames)
 
 ## Breaking Changes Impact Matrix
 
-| Change | 01단계 | 02단계 | 03단계 | 모델 |
-|--------|--------|--------|--------|------|
-| Target 생성 위치 변경 | ✅ | ⚠️ | ⚠️ | ❌ |
-| Feature Shift | ✅ | ✅ | ⚠️ | ❌ |
-| Ticker Feature 제외 | ✅ | ✅ | ⚠️ | ❌ |
+| Change | 01단계 | 02단계 | 03단계 | 모델 | 하위 호환 |
+|--------|--------|--------|--------|------|-----------|
+| **v3.1.1: Target 위치 복귀** | ✅ | ⚠️ | ✅ | ✅ | 🟢 높음 |
+| **v3.1.0: Multi-horizon** | ✅ | ✅ | ⚠️ | ❌ | 🟢 높음 |
+| v3.0.0: Target 위치 변경 | ✅ | ⚠️ | ⚠️ | ❌ | 🟡 보통 |
+| v3.0.0: Feature Shift | ✅ | ✅ | ⚠️ | ❌ | 🟡 보통 |
+| v3.0.0: Ticker 제외 | ✅ | ✅ | ⚠️ | ❌ | 🔴 낮음 |
 
 **범례**:
 - ✅ 영향 없음
 - ⚠️ 코드 수정 필요
 - ❌ 재학습 필요
+- 🟢 높음: 자동 또는 최소 작업
+- 🟡 보통: 단계별 마이그레이션 필요
+- 🔴 낮음: 전면 재작업 필요
 
 ---
 
 ## Notes
 
 - **MAJOR 업데이트 주기**: 분기당 1회 이내
+- **MINOR 업데이트**: 기능 추가 시 즉시 릴리스
+- **PATCH 업데이트**: 버그 수정 및 문서 개선
 - **마이그레이션 지원**: 모든 Breaking Change에 스크립트 제공
 - **테스트 커버리지**: 스키마 변경 시 단위 테스트 필수
 - **문서 우선**: 코드 변경 전 스키마 문서 업데이트
 
 ---
 
-**Last Updated**: 2026-01-18  
-**Current Version**: 3.0.0  
+**Last Updated**: 2026-01-21  
+**Current Version**: 3.1.1  
 **Maintained by**: SignalWeaver Team
