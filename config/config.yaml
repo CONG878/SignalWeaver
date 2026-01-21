@@ -29,10 +29,10 @@ training:
   valid_window_days: 60
   test_window_days: 60
   num_valid: 3       # Walk-forward 검증 횟수
-  base_price_col: "close"
+  target_col_name: "target_log_close"
   
-  # 다중 출력 타깃 설정 (Chunk size: 5)
-  target_columns: ["h1", "h2", "h3", "h4", "h5"]
+  # 예측하고자 하는 시차(영업일) 리스트
+  horizons: [1, 2, 3, 4, 5]
   
   # MultiOutputRegressor용 파라미터
   lgbm_params:

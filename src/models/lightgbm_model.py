@@ -78,35 +78,41 @@ class LightGBMModel(ModelBase):
             [(X_valid, y_valid), ...]
             y_valid 역시 y와 동일한 형태여야 함
         """
-        # 1. Target 포맷 표준화 (Series -> DataFrame)
+        # 1. 특정 식별자(ID) 추출
+        target_id = kwargs.pop('target_name', None)
+
         if isinstance(y, pd.Series):
             y = y.to_frame()
         
-        new_targets = [c for c in y.columns if c not in self.target_columns]
-        self.target_columns.extend(new_targets)
-        
-        cat_indices = [i for i, c in enumerate(self.feature_list) if c in self.categorical_features]
-        cat_arg = cat_indices if cat_indices else 'auto'
-
-        loop_targets = y.columns
-        if len(loop_targets) > 1:
-            loop_targets = tqdm(loop_targets, desc="Training Multi-output")
+        # 2. 루프 대상 결정
+        # target_id가 있으면 그 이름으로 저장하되, 
+        # 실제 데이터는 y의 첫 번째 컬럼(target_log_close)을 사용함
+        loop_targets = [target_id] if target_id else y.columns
 
         for col in loop_targets:
-            y_col = y[col]
-            train_ds = lgb.Dataset(X[self.feature_list], label=y_col, categorical_feature=cat_arg)
+            # [수정] 데이터 추출 로직: 
+            # col 이름이 y에 있으면 쓰고, 없으면 y의 첫 번째 컬럼을 가져옴
+            y_col = y[col] if col in y.columns else y.iloc[:, 0]
             
-            valid_sets = [train_ds]
-            valid_names = ['train']
+            # 메타데이터 업데이트
+            if col not in self.target_columns:
+                self.target_columns.append(col)
+
+            train_ds = lgb.Dataset(X[self.feature_list], label=y_col)
             
+            valid_sets = [train_ds]; valid_names = ['train']
             if eval_set:
                 for i, (X_val, y_val) in enumerate(eval_set, 1):
-                    # y_val에서 해당 컬럼 추출
-                    y_val_c = y_val[col] if isinstance(y_val, pd.DataFrame) else y_val
-                    valid_ds = lgb.Dataset(X_val[self.feature_list], label=y_val_c, reference=train_ds, categorical_feature=cat_arg)
-                    valid_sets.append(valid_ds)
-                    valid_names.append(f'valid{i}')
+                    # [수정] 검증 데이터도 동일하게 첫 번째 컬럼 참조
+                    if isinstance(y_val, pd.DataFrame):
+                        y_val_c = y_val[col] if col in y_val.columns else y_val.iloc[:, 0]
+                    else:
+                        y_val_c = y_val
+                        
+                    valid_ds = lgb.Dataset(X_val[self.feature_list], label=y_val_c, reference=train_ds)
+                    valid_sets.append(valid_ds); valid_names.append(f'valid{i}')
 
+            # 3. 학습 및 저장
             booster = lgb.train(
                 params=self.params,
                 train_set=train_ds,
@@ -114,7 +120,6 @@ class LightGBMModel(ModelBase):
                 valid_names=valid_names,
                 **kwargs,
             )
-            
             self.models[col] = booster
 
         self.is_fitted = True

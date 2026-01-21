@@ -13,14 +13,16 @@ class WalkForwardTrainer:
         *,
         model: ModelBase,
         feature_cols: List[str],
-        target_col_prefix: str = "target_log_close",
+        target_col_name: str = "target_log_close", # 베이스 타깃명
+        horizons: List[int] = [1],                 # 시차 리스트
         date_col: str = "date",
         categorical_features: Optional[List[str]] = None,
         base_price_col: str = "close"
     ):
         self.model = model
         self.feature_cols = feature_cols
-        self.target_col_prefix = target_col_prefix
+        self.target_col_name = target_col_name
+        self.horizons = horizons
         self.date_col = date_col
         self.categorical_features = categorical_features or []
         self.base_price_col = base_price_col
@@ -35,18 +37,25 @@ class WalkForwardTrainer:
         num_valid: int = 1,
         fit_kwargs: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+        """
+        Target-Centric Walk-Forward 학습 및 검증 실행
+        - 02단계에서 생성된 공통 타깃(self.target_col_name)을 사용합니다.
+        - 각 Horizon별로 전체 데이터 시프트 후 슬라이싱하여 경계면 데이터 손실을 방지합니다.
+        """
         fit_kwargs = fit_kwargs or {}
-        target_cols = getattr(self.model, 'target_columns', [self.target_col_prefix])
         
-        # 초기화: 데이터 정렬 및 날짜 타입 보정
+        # 모델 및 트레이너의 타깃 식별자 생성 (예: target_log_close_h1, ...)
+        target_cols = [f"{self.target_col_name}_h{h}" for h in self.horizons]
+        
+        # 데이터 정렬 및 날짜 타입 보정
         df_run = df.copy().sort_values([self.date_col, 'ticker'])
         df_run[self.date_col] = pd.to_datetime(df_run[self.date_col])
         
-        # 타깃 생성 (현재 시점 가격)
-        for col in target_cols:
-            df_run[col] = np.log(df_run[self.base_price_col])
+        # 02단계에서 생성된 베이스 타깃 컬럼 존재 여부 확인
+        if self.target_col_name not in df_run.columns:
+            raise KeyError(f"'{self.target_col_name}' 컬럼이 데이터셋에 없습니다. 02단계를 먼저 실행하세요.")
 
-        # 날짜 인덱싱
+        # 날짜 인덱싱 설정
         all_dates = np.sort(df_run[self.date_col].unique())
         train_end_val = pd.to_datetime(train_end).to_datetime64()
         train_end_idx = np.searchsorted(all_dates, train_end_val)
@@ -62,7 +71,9 @@ class WalkForwardTrainer:
         current_train_end_idx = train_end_idx
         total_folds = num_valid + 1
 
-        print(f"🚀 Starting Target-Centric Training (Corrected Logic)")
+        print(f"🚀 Starting Target-Centric Multi-horizon Training")
+        print(f"   - Base Target: {self.target_col_name}")
+        print(f"   - Horizons: {self.horizons}")
 
         for i in range(total_folds):
             is_test_fold = (i == num_valid)
@@ -70,52 +81,51 @@ class WalkForwardTrainer:
             eval_end_idx = current_train_end_idx + window_size
             
             if eval_end_idx > len(all_dates):
+                print(f"⚠️ 데이터 부족으로 Fold {i+1}에서 조기 종료합니다.")
                 break
             
             train_dates = all_dates[current_train_start_idx : current_train_end_idx]
             eval_dates = all_dates[current_train_end_idx : eval_end_idx]
             
             fold_name = "TEST" if is_test_fold else f"Valid-{i+1}"
-            print(f"\n[Fold {i+1}] {fold_name} ({len(train_dates)} train days, {len(eval_dates)} eval days)")
+            print(f"\n[{fold_name}] Training horizons...")
 
-            # [핵심 수정] Horizon 별로 "전체 데이터 시프트 -> 슬라이싱" 수행
-            for h_idx, col in enumerate(target_cols, 1):
-                # 1. 필요한 컬럼만으로 작업용 DF 생성 (메모리 최적화)
-                #    전체 기간에 대해 Shift를 수행해야 슬라이싱 경계면의 데이터를 살릴 수 있음
-                work_cols = [self.date_col, 'ticker', col] + self.feature_cols
+            # 각 시차(Horizon)별 독립 모델 학습
+            for h in self.horizons:
+                target_id = f"{self.target_col_name}_h{h}"
+                
+                # 1. 전체 데이터 시프트 (Shift-then-Slice)
+                # 공통 타깃인 target_log_close는 고정하고 피처만 과거로 시프트
+                work_cols = [self.date_col, 'ticker', self.target_col_name] + self.feature_cols
                 temp_df = df_run[work_cols].copy()
                 
-                # 2. 피처 시프트 (전체 데이터 대상)
                 for f in self.feature_cols:
-                    temp_df[f] = temp_df.groupby('ticker')[f].shift(h_idx)
+                    temp_df[f] = temp_df.groupby('ticker')[f].shift(h)
                 
-                # 3. 날짜 기준으로 슬라이싱
-                train_df = temp_df[temp_df[self.date_col].isin(train_dates)]
-                eval_df = temp_df[temp_df[self.date_col].isin(eval_dates)]
-                
-                # 4. 결측 제거 (이제 경계면 데이터는 보존되고, 진짜 결측만 제거됨)
-                train_df = train_df.dropna()
-                eval_df = eval_df.dropna()
+                # 2. 날짜 슬라이싱
+                train_df = temp_df[temp_df[self.date_col].isin(train_dates)].dropna()
+                eval_df = temp_df[temp_df[self.date_col].isin(eval_dates)].dropna()
 
-                # 5. 모델 학습 (해당 Horizon만)
+                # 3. 개별 모델 Fit (y는 시프트되지 않은 오늘의 정답 사용)
                 self.model.fit(
                     train_df[self.feature_cols],
-                    train_df[[col]], # DataFrame 형태로 전달
-                    eval_set=[(eval_df[self.feature_cols], eval_df[[col]])],
+                    train_df[[self.target_col_name]], 
+                    eval_set=[(eval_df[self.feature_cols], eval_df[[self.target_col_name]])],
+                    target_name=target_id,
                     **fit_kwargs
                 )
 
-            # 평가 및 예측
-            metrics = self._evaluate(df_run, eval_dates, target_cols)
+            # 4. Fold 평가 및 예측 결과 기록
+            metrics = self._evaluate(df_run, eval_dates, self.horizons)
             
             if is_test_fold:
                 test_metrics = metrics
-                test_predictions = self._predict_with_metadata(df_run, eval_dates, target_cols)
+                test_predictions = self._predict_with_metadata(df_run, eval_dates, self.horizons)
                 final_model = copy.deepcopy(self.model)
-                print(f"   ✅ {fold_name} RMSE: {metrics['avg_rmse']:.6f}")
             else:
                 valid_metrics_history.append(metrics)
-                print(f"   ✅ {fold_name} RMSE: {metrics['avg_rmse']:.6f}")
+            
+            print(f"   ✅ {fold_name} Avg RMSE: {metrics['avg_rmse']:.6f}")
             
             # 윈도우 이동
             shift_step = valid_window_days
@@ -129,58 +139,56 @@ class WalkForwardTrainer:
             'final_model': final_model
         }
 
-    def _evaluate(self, df_run, eval_dates, target_cols) -> Dict[str, float]:
+    def _evaluate(self, df_run: pd.DataFrame, eval_dates: np.ndarray, horizons: List[int]) -> Dict[str, float]:
         rmses = []
-        # 평가 시에도 Shift-then-Slice 로직 적용
-        cols_needed = [self.date_col, 'ticker'] + self.feature_cols + target_cols
-        base_df = df_run[cols_needed].copy() # 전체 데이터 복사본 (피처 원본)
+        # 컬럼 리스트 구성 시 horizons(리스트)가 아닌 공통 타깃명을 사용
+        cols_needed = [self.date_col, 'ticker', self.target_col_name] + self.feature_cols
+        base_df = df_run[cols_needed].copy()
         
-        for h_idx, col in enumerate(target_cols, 1):
+        for h in horizons:
+            # 모델 식별자 생성 (h1, h2...)
+            target_id = f"{self.target_col_name}_h{h}"
+            
             temp_df = base_df.copy()
             for f in self.feature_cols:
-                temp_df[f] = temp_df.groupby('ticker')[f].shift(h_idx)
+                temp_df[f] = temp_df.groupby('ticker')[f].shift(h)
             
-            # 슬라이싱 & Dropna
-            eval_df = temp_df[temp_df[self.date_col].isin(eval_dates)].dropna(subset=self.feature_cols + [col])
+            # 슬라이싱 & 결측 제거
+            eval_df = temp_df[temp_df[self.date_col].isin(eval_dates)].dropna()
             
             if len(eval_df) == 0: continue
             
-            y_true = eval_df[col].values
-            # target_name을 사용하여 해당 Horizon 모델로만 예측
-            y_pred = self.model.predict(eval_df[self.feature_cols], target_name=col).values
+            y_true = eval_df[self.target_col_name].values
+            # target_name 인자를 사용하여 해당 시차 전용 모델로 예측
+            y_pred = self.model.predict(eval_df[self.feature_cols], target_name=target_id).values
             
             rmses.append(np.sqrt(np.mean((y_true - y_pred) ** 2)))
             
         return {'avg_rmse': np.mean(rmses) if rmses else np.nan, 'samples': len(eval_dates)}
 
-    def _predict_with_metadata(self, df_run, eval_dates, target_cols) -> pd.DataFrame:
-        # 결과용 뼈대: 평가 날짜의 원본 데이터
+    def _predict_with_metadata(self, df_run: pd.DataFrame, eval_dates: np.ndarray, horizons: List[int]) -> pd.DataFrame:
+        # 결과용 뼈대
         eval_base = df_run[df_run[self.date_col].isin(eval_dates)].copy()
-        result = eval_base[[self.date_col, 'ticker', self.base_price_col]].copy()
+        result = eval_base[[self.date_col, 'ticker', self.base_price_col, self.target_col_name]].copy()
         
-        # 예측용 전체 데이터 준비
+        # 예측용 베이스 데이터
         cols_needed = [self.date_col, 'ticker'] + self.feature_cols
         full_base = df_run[cols_needed].copy()
         
-        for h_idx, col in enumerate(target_cols, 1):
-            # 전체 데이터 시프트
+        for h in horizons:
+            target_id = f"{self.target_col_name}_h{h}"
+            
             temp_full = full_base.copy()
             for f in self.feature_cols:
-                temp_full[f] = temp_full.groupby('ticker')[f].shift(h_idx)
+                temp_full[f] = temp_full.groupby('ticker')[f].shift(h)
             
-            # 평가 구간 슬라이싱 (Dropna 하지 않음 -> 결측이면 NaN으로 남겨서 예측 시도 or 채움)
-            # 여기서는 dropna를 하면 행이 사라져서 result와 인덱스 매칭이 깨짐.
-            # 하지만 shift로 인해 앞부분이 NaN이면 예측 불가.
-            # -> lightgbm은 NaN 예측 가능. 따라서 dropna 없이 진행.
             eval_slice = temp_full[temp_full[self.date_col].isin(eval_dates)]
             
-            # 인덱스 정렬 보장
-            # eval_slice와 result는 같은 날짜/종목 순서여야 함 (sort_values 되어 있다고 가정)
+            # 예측 수행 (lightgbm은 NaN이 있어도 모델 내부에서 처리 가능)
+            preds = self.model.predict(eval_slice[self.feature_cols], target_name=target_id)
             
-            preds = self.model.predict(eval_slice[self.feature_cols], target_name=col)
+            # 결과 저장 (target_id를 컬럼명으로 사용)
+            result[f'pred_{target_id}'] = preds.values
+            result[f'true_{target_id}'] = eval_base[self.target_col_name].values
             
-            # 결과 할당 (Index alignment)
-            result[f'pred_{col}'] = preds.values
-            result[f'true_{col}'] = eval_base[col].values if col in eval_base else np.log(result[self.base_price_col])
-
         return result
