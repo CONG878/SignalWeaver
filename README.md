@@ -1,10 +1,8 @@
-﻿# 🚀 SignalWeaver: Multi-horizon Stock Forecasting Framework
+﻿# 🚀 SignalWeaver
 
 SignalWeaver는 한국 주식 시장(KRX) 데이터를 기반으로 단기 및 중장기 주가를 예측하는 **다중 시점 직접 예측(Direct Multi-step Forecasting)** 프레임워크입니다. 
 
 단순히 다음 날의 주가를 맞추는 것을 넘어, 미래 5일(1주일)의 흐름을 직접 예측하고 이를 결합하여 장기적인 추세를 분석하는 하이브리드 전략을 사용합니다.
-
----
 
 ## ✨ Key Features
 
@@ -19,8 +17,6 @@ SignalWeaver는 한국 주식 시장(KRX) 데이터를 기반으로 단기 및 �
 - **Model**: LightGBM (Multi-output implementation)
 - **Processing**: Pandas, NumPy
 - **Environment**: Python 3.10+ / Jupyter Notebook
-
----
 
 ## 📂 Project Structure
 
@@ -41,10 +37,6 @@ SignalWeaver/
 ├── docs/                     # 아키텍처 문서
 │   ├── data_schema.md           # 데이터 스키마 정의 (v3.1.1)
 │   └── changelog_schema.md      # 스키마 변경 이력
-├── notebooks/                # 실행 가능한 노트북 파이프라인
-│   ├── 01_collect_data.ipynb    # Step 1: 데이터 수집
-│   ├── 02_build_dataset.ipynb   # Step 2: 전처리 + Feature 생성
-│   └── 03_train_predict.ipynb   # Step 3: Multi-horizon 학습 및 예측
 ├── src/                      # 소스 코드 모듈
 │   ├── data_loader/             # 데이터 수집 (RawPriceCollector)
 │   ├── features/                # 피처 엔지니어링 (Builder, Technical)
@@ -52,10 +44,11 @@ SignalWeaver/
 │   ├── models/                  # 모델 래퍼 (LightGBMModel)
 │   ├── universe/                # 유니버스 선정 (select_universe)
 │   └── utils/                   # 유틸리티 (Config Loader)
+├── 01_collect_data.ipynb    # Step 1: 데이터 수집
+├── 02_build_dataset.ipynb   # Step 2: 전처리 + Feature 생성
+├── 03_train_predict.ipynb   # Step 3: Multi-horizon 학습 및 예측
 └── README.md                 # 본 문서
 ```
-
----
 
 ## 📊 Data Policy (v3.1.1)
 
@@ -99,8 +92,6 @@ data/01_raw/{YYYYMMDD}/
 - ✅ 로그 스케일 랜덤 대기로 서버 차단 회피
 - ✅ 하이브리드 저장 (기계용 Parquet + 사람용 CSV)
 
----
-
 ### **Step 2: 데이터셋 구축** (`02_build_dataset.ipynb`)
 
 **역할**: 기술적 지표 계산, 메타 지표 생성, **Target 생성**, 데이터 정제
@@ -139,8 +130,6 @@ data/02_processed/{YYYYMMDD}/
 - **Features**: `feature_ma_5`, `feature_rsi_14`, `feature_macd`, ...
 - **Meta**: `liquidity_score`, `risk_composite`, `is_suspended`, ...
 - **Target**: `target_log_close` (로그 종가, 예측 대상)
-
----
 
 ### **Step 3: Multi-Horizon 학습 및 예측** (`03_train_predict.ipynb`)
 
@@ -207,4 +196,5 @@ data/03_results/{YYYYMMDD}/
 data/04_models/{YYYYMMDD}/
 ├── lightgbm_multi.pkl   # 학습된 Multi-output 모델
 └── registry.json        # 모델 메타데이터
+
 ```
