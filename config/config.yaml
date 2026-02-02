@@ -1,12 +1,12 @@
 # SignalWeaver 프로젝트 공통 설정
 project:
   name: "SignalWeaver"
-  reference_date: "20260120"
+  reference_date: "20260130"
 
 # 01_collect_data 관련 설정
 data_collection:
-  start_date: "20221019"
-  end_date: "20260120"
+  start_date: "20221031"
+  end_date: "20260130"
   save_csv: True
   save_parquet: True
   min_sleep: 0.05
@@ -23,7 +23,7 @@ preprocessing:
 
 # 03_train_predict 관련 설정 (Multi-Horizon Update)
 training:
-  train_end: "2025-01-22"
+  train_end: "2025-02-06"
   
   # Multi-horizon 설정
   valid_window_days: 60
@@ -54,3 +54,13 @@ paths:
   processed_dir: "data/02_processed"
   result_dir: "data/03_results"
   model_dir: "data/04_models"
+  meta_dir: "data/99_meta"
+
+# 캘린더 설정
+calendar:
+  # 시작일과 종료일을 구체적으로 지정 (save_trading_days의 방식 반영)
+  start_date: "2026-02-02" 
+  end_date: "2026-04-30"
+  
+  # pandas_market_calendars 사용 여부 설정
+  prefer_mcal: True
