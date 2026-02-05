@@ -48,6 +48,10 @@ training:
     n_jobs: -1       # 병렬 처리
     verbose: -1      # 로그 끄기
 
+# 05_universe_selection 관련설정
+universe:
+  model_date: "2026-01-20"
+
 # 경로 설정
 paths:
   raw_dir: "data/01_raw"
