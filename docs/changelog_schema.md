@@ -102,15 +102,6 @@ data/03_results/{YYYYMMDD}/universe/
 | 고위험 | `risk_composite_raw` > 0.8 |
 | 저정확도 | `accuracy_rank` > 1000 |
 
-**Soft Ranking** (점수 기반):
-```python
-# Strategy A: 가중 선형 결합 (균형)
-final_score = 0.40×accuracy + 0.35×return + 0.25×safety
-
-# Strategy B: 신뢰도 가중 (확실성) ⭐
-final_score = expected_return × (confidence^1.5)
-```
-
 **이중 날짜 기준** (새로운 개념):
 ```
 model_train_date (2026-01-20)
