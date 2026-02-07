@@ -1,4 +1,4 @@
-﻿# Schema Changelog
+﻿# Schema Changelog (Updated v3.2.0)
 
 All notable changes to the data schema will be documented in this file.
 
@@ -7,11 +7,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.2.0] - 2026-02-07
+
+### 🟢 MINOR Changes
+
+#### 1. 04단계 추가: 미래 주가 예측 (Recursive Extension)
+
+**변경 사항**:
+- 학습된 모델을 이용한 미래 주가 예측 파이프라인 추가
+- Recursive Extension: 5일 Chunk 단위 반복 예측으로 60일 이상 확장 가능
+- 예측 오차 누적 고려 (뒤로 갈수록 신뢰도 하락)
+
+**새로운 파일 구조**:
+```
+data/03_results/{YYYYMMDD}/forecasts/
+  ├── future_forecasts.parquet         # 통합 미래 예측
+  └── csv/{종목명}_forecast.csv        # 개별 CSV (옵션)
+```
+
+**새로운 컬럼**:
+| 컬럼 | 설명 |
+|------|------|
+| `date` | 예측 대상 날짜 |
+| `ticker` | 종목 코드 |
+| `horizon` | 예측 시차 (1~5) |
+| `chunk_idx` | Recursive 단계 (0, 1, 2, ...) |
+| `pred_log_close` | 예측 로그 종가 |
+| `pred_close` | 예측 종가 (원화) |
+
+**영향**:
+- ✅ 모델 구조 변경 없음 (기존 03단계 모델 재사용)
+- ✅ 02~03단계 출력 변경 없음 (상위 호환)
+- ⚠️ Chunk 0: 신뢰도 높음, Chunk 2+: 신뢰도 낮음 (오차 누적)
+
+#### 2. 05단계 추가: 유니버스 선정 (Universe Selection)
+
+**변경 사항**:
+- 3대 평가 지표 기반 투자 종목 선정 파이프라인
+- Hard Constraints + Soft Ranking 2단계 필터링
+- 2가지 전략 제공 (Strategy A: 균형, Strategy B: 확실성)
+
+**새로운 파일 구조**:
+```
+data/03_results/{YYYYMMDD}/universe/
+  ├── universe_full.parquet            # 전체 평가 종목
+  ├── universe_candidates.parquet      # Top-K 후보
+  ├── investment_report.csv            # CSV 리포트
+  ├── investment_report.xlsx           # Excel 멀티시트
+  └── filter_statistics.json           # 필터링 통계
+```
+
+**새로운 지표 (정확도 평가)**:
+```python
+# 과거 예측 오차 기반 (model_train_date 기준)
+- rmse: Root Mean Square Error
+- mae: Mean Absolute Error
+- directional_accuracy: 방향성 정확도 (0~1)
+- confidence_rmse: RMSE 역수 기반 신뢰도
+- accuracy_rank: 정확도 순위
+```
+
+**새로운 지표 (수익성 평가)**:
+```python
+# 미래 예측 수익률 기반 (forecast_date 기준)
+- daily_log_return: 시간당 로그 수익률 (복리)
+- total_log_return: 총 로그 수익률
+- total_return_pct: 총 수익률 (%)
+- hold_days: 최적 보유 기간
+- buy_date, sell_date: 최적 매매 시점
+- buy_price, sell_price: 예상 매매가
+- return_rank: 수익률 순위
+```
+
+**새로운 지표 (위험도 평가)** ⭐:
+```python
+# 예측값 시계열 기반 내재 위험 (미래 위험)
+- volatility: 변동성 (로그 수익률 표준편차)
+- downside_risk: 하방 위험 (음수 수익률만)
+- var_95: VaR (5% 분위수)
+- cvar_95: CVaR (최악 5% 평균)
+- max_drawdown: 최대 낙폭
+- skewness: 비대칭도 (음수=하락쏠림)
+- kurtosis: 초과 첨도 (Fat Tail 지표)
+- risk_composite_raw: 복합 리스크 (원점수)
+- risk_score_normalized: 복합 리스크 (0~1 정규화)
+- risk_rank: 위험 순위
+```
+
+**Hard Constraints** (필수 조건):
+| 조건 | 제거 기준 |
+|------|---------|
+| 거래정지/상폐 | `is_suspended=1` 또는 `is_delisted=1` |
+| 저유동성 | 20일 평균 거래대금 < 5천만 원 |
+| 고위험 | `risk_composite_raw` > 0.8 |
+| 저정확도 | `accuracy_rank` > 1000 |
+
+**Soft Ranking** (점수 기반):
+```python
+# Strategy A: 가중 선형 결합 (균형)
+final_score = 0.40×accuracy + 0.35×return + 0.25×safety
+
+# Strategy B: 신뢰도 가중 (확실성) ⭐
+final_score = expected_return × (confidence^1.5)
+```
+
+**이중 날짜 기준** (새로운 개념):
+```
+model_train_date (2026-01-20)
+  ↓ [정확도 평가: 과거 예측 오차]
+  
+forecast_date (2026-02-07+)
+  ↓ [수익성 평가: 미래 예측 수익률]
+```
+
+**영향**:
+- ✅ 02~04단계 출력 변경 없음
+- ✅ 기존 모델 재사용 (새로운 학습 불필요)
+- ⚠️ 05단계는 new output 전용 (기존 파이프라인 영향 없음)
+
+#### 3. 위험도 평가 체계 신규 도입
+
+**5대 표준 지표** (src/utils/risk.py):
+1. **Volatility**: 기본 변동성 (표준편차)
+2. **Downside Risk**: 하방 위험만 (손실 변동성)
+3. **VaR/CVaR**: 극단 리스크 (극단값 기반)
+4. **MDD**: 최대 낙폭 (심리적 영향)
+5. **Skew/Kurt**: 분포 형태 (비대칭성, Fat Tail)
+
+**특징**:
+- 모델 예측 오차와 독립 (내재 위험)
+- 예측값 시계열 기반 (미래 위험도)
+- 복합 점수로 통합 (가중 평균)
+
+**위험 vs 정확도 차이**:
+```
+정확도 (Accuracy):
+  - "모델이 얼마나 잘 맞추는가?"
+  - 과거 데이터로 측정
+  - Epistemic 불확정성
+  
+위험도 (Risk):
+  - "이 종목이 얼마나 불안정한가?"
+  - 미래 데이터로 예상
+  - Aleatoric 불확정성
+```
+
+#### 4. 필터링 유틸리티 추가
+
+**새로운 모듈** (src/utils/filters.py):
+- `filter_tradability()`: 거래정지/상장폐지 제거
+- `detect_manipulation_risk()`: 작전주/테마주 탐지
+- `filter_manipulation()`: 작전주 제거
+- `filter_penny_stocks()`: 저가주 제거
+- `filter_liquidity()`: 저유동성 제거
+- `apply_hard_filters()`: 통합 필터 적용
+
+**Phase 2 설계서 반영**:
+> "학습은 전부, 투자 후보는 엄선해서"
+> "작전주 필터는 2단계 구조: 사후 탐지 + 사전 경고"
+
+---
+
 ## [3.1.1] - 2026-01-21
 
 ### 🔵 PATCH Changes
 
-#### Target 생성 위치 재변경 (03단계 → 02단계)
+#### Target 생성 위치 재변경 (03 → 02)
 
 **변경 사항**:
 - **v3.0.0**: 03단계(학습 직전)에서 Target 생성
@@ -39,7 +200,7 @@ df_final['target_log_close'] = np.where(
 **영향**:
 - ✅ **02단계 출력**: `target_log_close` 컬럼 포함
 - ✅ **03단계 입력**: Target이 이미 준비된 상태로 시작
-- ⚠️ **하위 호환**: v3.0.x 사용자는 02단계 재실행 권장 (마이그레이션 불필요)
+- ⚠️ **하위 호환**: v3.0.x 사용자는 02단계 재실행 권장
 
 ---
 
@@ -67,12 +228,11 @@ t일의 가격을 맞추기 위해:
 - h=4: t-4일 피처 사용
 - h=5: t-5일 피처 사용
 
-→ 5개의 독립된 모델이 동일한 정답(t일 가격)을 예측
+→ 5개의 독립된 모델이 동일한 정답(t일 가격) 예측
 ```
 
-**Target 컬럼 (식별자)**:
+**Target 컬럼** (식별자, 데이터셋에는 없음):
 ```python
-# 모델 내부적으로만 사용 (데이터셋에는 없음)
 model.target_columns = [
     'target_log_close_h1',
     'target_log_close_h2',
@@ -94,8 +254,6 @@ model.target_columns = [
 - ⚠️ **모델 클래스**: `LightGBMModel`이 Multi-output 지원
 - ⚠️ **Trainer 로직**: `WalkForwardTrainer`에 Target-Centric 정렬 구현
 - ✅ **하위 호환**: 기존 단일 예측도 `horizons=[1]`로 지원
-
----
 
 #### 2. Target-Centric Alignment 패턴
 
@@ -119,31 +277,14 @@ date       | feature_ma_5 (shifted) | target
 → "이 날짜의 가격을 예측 대상으로 삼음"
 
 **장점**:
-- ✅ 예측 결과 해석 직관성 향상 ("2026-01-17의 예측값")
-- ✅ 백테스트 로직 단순화 (날짜 매칭 혼란 제거)
+- ✅ 예측 결과 해석 직관성 향상
+- ✅ 백테스트 로직 단순화
 - ✅ 운영 환경과 동일한 시간 개념
-
-**구현 (Trainer 내부)**:
-```python
-# Shift-then-Slice 패턴
-for h in horizons:
-    # 1. 전체 데이터를 먼저 시프트
-    for col in feature_cols:
-        temp_df[col] = temp_df.groupby('ticker')[col].shift(h)
-    
-    # 2. 시프트 후 날짜로 슬라이싱
-    train_df = temp_df[temp_df['date'].isin(train_dates)].dropna()
-    
-    # 3. Target은 시프트하지 않음 (오늘의 정답)
-    model.fit(train_df[feature_cols], train_df['target_log_close'])
-```
 
 **영향**:
 - ⚠️ **Trainer 로직**: `src/modeling/trainer.py` 전면 개편
-- ✅ **데이터셋 구조**: 변경 없음 (Trainer가 런타임에 처리)
-- ✅ **예측 결과**: `date` 컬럼 의미 변경 (타깃 시점)
-
----
+- ✅ **데이터셋 구조**: 변경 없음
+- ✅ **예측 결과**: `date` 컬럼 의미 변경
 
 #### 3. Shift-then-Slice 패턴
 
@@ -153,8 +294,8 @@ for h in horizons:
 
 **Before (Slice-then-Shift)**:
 ```python
-train_df = df[df['date'].isin(train_dates)]  # 먼저 자름
-train_df['feature'] = train_df['feature'].shift(1)  # 첫 행 NaN 발생
+train_df = df[df['date'].isin(train_dates)]
+train_df['feature'] = train_df['feature'].shift(1)  # 첫 행 NaN
 ```
 → 학습 구간의 첫 날짜 데이터 손실
 
@@ -172,47 +313,12 @@ train_df = df_shifted[df_shifted['date'].isin(train_dates)].dropna()
 
 ---
 
-### 📚 Documentation
-
-#### Multi-Horizon 예측 가이드
-
-**설정 (config.yaml)**:
-```yaml
-training:
-  horizons: [1, 2, 3, 4, 5]  # 5일치 동시 예측
-  target_col_name: "target_log_close"
-```
-
-**사용 예시**:
-```python
-# 모델 초기화
-model = LightGBMModel(
-    model_version="v3.1",
-    params=lgbm_params,
-    feature_list=feature_cols
-)
-
-# Trainer 실행 (자동으로 Multi-horizon 학습)
-trainer = WalkForwardTrainer(
-    model=model,
-    horizons=[1, 2, 3, 4, 5],
-    target_col_name='target_log_close'
-)
-
-results = trainer.run(df, ...)
-
-# 예측 결과
-predictions = results['test_predictions']
-# 컬럼: date, ticker, pred_target_log_close_h1, ..., pred_target_log_close_h5
-```
-
----
-
 ## [3.0.0] - 2026-01-18
 
 ### 🔴 Breaking Changes
 
 #### 1. Target 생성 위치 변경 (v2.x에서)
+
 **변경 사항**:
 - **v2.x**: 02단계에서 `target_return`, `target_log_return` 생성
 - **v3.0.0**: **03단계**에서 `target_log_close` 생성
@@ -222,36 +328,8 @@ predictions = results['test_predictions']
 - 02단계는 "Feature 준비"만 담당하는 단일 책임 원칙
 - 03단계에서 학습 직전에 Target 정의하여 유연성 확보
 
-**마이그레이션 가이드**:
-```python
-# v2.x 데이터셋 (02단계 출력)
-df = pd.read_parquet("data/02_processed/dataset.parquet")
-
-# Target 컬럼 제거 (있다면)
-target_cols = [c for c in df.columns if c.startswith('target_')]
-if target_cols:
-    df = df.drop(columns=target_cols)
-
-# v3.0.0 형식으로 저장
-df.to_parquet("dataset_v3.parquet", index=False)
-```
-
-```python
-# v3.0.0 사용법 (03단계)
-df = pd.read_parquet("data/02_processed/dataset.parquet")
-
-# Target 생성 (학습 직전)
-df['target_log_close'] = np.log(df['close'])
-```
-
-**영향**:
-- ⚠️ **02단계 출력**: Target 컬럼 제거 필요
-- ⚠️ **03단계 학습 코드**: Target 생성 로직 추가 필요
-- ✅ **하위 호환**: 02단계 Feature는 그대로 사용 가능
-
----
-
 #### 2. Feature Shift 도입
+
 **변경 사항**:
 - t일 행에 t-1일의 Feature를 배치
 - 의도: "어제 정보로 오늘 종가 예측"
@@ -261,22 +339,11 @@ df['target_log_close'] = np.log(df['close'])
 # 03단계에서 필수 적용
 for col in feature_cols:
     df[col] = df.groupby('ticker')[col].shift(1)
-
-# Shift로 발생한 NaN 제거
 df = df.dropna(subset=feature_cols)
 ```
 
-**이유**:
-- Look-ahead Bias 방지
-- 실전 운영 환경과 동일한 조건
-
-**영향**:
-- ⚠️ 각 종목의 첫 행(NaN) 자동 제거됨
-- ⚠️ 학습 가능 데이터 길이 1일 감소
-
----
-
 #### 3. Ticker Feature 제외
+
 **변경 사항**:
 - **v2.x**: Ticker를 Categorical Feature로 사용 가능
 - **v3.0.0**: **Ticker를 Feature로 사용 안 함**
@@ -286,205 +353,14 @@ df = df.dropna(subset=feature_cols)
 - 차원 폭발 (2,900개 종목 → 2,900차원)
 - 일반화 성능 저하
 
-**대체 수단**:
-```python
-# Meta Features로 종목 특성 표현
-feature_cols = [
-    'feature_ma_5', 'feature_rsi_14', ...  # 기술지표
-    'liquidity_score',  # 유동성 (종목별 차이 반영)
-    'risk_composite'    # 리스크 (종목별 차이 반영)
-]
-
-# ❌ 사용 금지
-# categorical_features = ['ticker']
-```
-
-**영향**:
-- ✅ 신규 종목 즉시 예측 가능
-- ✅ 모델 크기 감소
-- ⚠️ 종목 고유 패턴 학습 불가 (Trade-off)
-
----
-
-### ✨ New Features
-
-#### 1. 데이터 길이 표준화 함수
-**추가된 함수**: `filter_by_history()`
-
-**위치**: `src/features/builder.py`
-
-**기능**:
-```python
-def filter_by_history(
-    df: pd.DataFrame, 
-    min_history: int = 60,
-    threshold_ratio: float = 1.0
-) -> pd.DataFrame:
-    """
-    종목별 데이터 길이 표준화
-    - min_history: 초기 제거 기간 (warmup)
-    - threshold_ratio: 최장 길이 대비 유지 비율
-    """
-```
-
-**이유**:
-- Batch 학습 시 길이 불일치 문제 해결
-- Feature 준비 기간(60일) 일관성 있게 제거
-
-**사용 예**:
-```python
-# 02단계에서 자동 적용
-df_final = filter_by_history(
-    df_meta, 
-    min_history=60,
-    threshold_ratio=1.0  # 최장 길이와 일치하는 종목만 유지
-)
-```
-
----
-
-#### 2. 통합 모델 지향 설계
-**변경 사항**:
-- 종목별 개별 모델 → **전체 종목 통합 모델**
-
-**특징**:
-```python
-# 단일 모델로 전체 종목 처리
-model = LightGBMModel(
-    feature_list=['feature_ma_5', 'liquidity_score', ...],
-    categorical_features=[]  # Ticker 사용 안 함
-)
-
-# 전체 데이터로 학습
-model.fit(X_all, y_all)
-
-# 신규 종목도 즉시 예측
-new_stock_pred = model.predict(new_stock_features)
-```
-
-**장점**:
-- ✅ 종목 간 공통 패턴 학습
-- ✅ 신규 상장 종목 즉시 예측
-- ✅ 모델 관리 간소화 (1개 vs 2,900개)
-
----
-
-### 🔧 Changed
-
-#### 1. 파일 저장 구조 개선
-**변경 전**: 날짜별 분산 저장
-```
-data/01_raw/csv/삼성전자.csv
-data/02_processed/csv/삼성전자.csv
-```
-
-**변경 후**: 날짜별 폴더 + 통합 Parquet
-```
-data/01_raw/{YYYYMMDD}/
-  ├── krx_prices_{YYYYMMDD}.parquet  # 통합 (기계용)
-  ├── ticker_master_{YYYYMMDD}.csv   # 종목 마스터
-  └── csv/{종목명}.csv                # 개별 (사람용, 옵션)
-
-data/02_processed/{YYYYMMDD}/
-  ├── dataset.parquet                 # 통합 (기계용)
-  └── csv/{종목명}.csv                # 개별 (사람용, 옵션)
-```
-
-**이유**:
-- 날짜별 버전 관리 용이
-- 파이프라인 효율성 (통합 Parquet)
-- 디버깅 편의성 (개별 CSV)
-
-**하위 호환**: ✅ (파일 위치만 변경, 스키마 동일)
-
----
-
-#### 2. Feature 계산 모듈화
-**변경 사항**:
-- 기술지표 계산 로직 `src/features/technical.py`로 통합
-- `calc_rsi()`, `calc_macd()`, `calc_bollinger()` 등 재사용 가능 함수
-
-**Before**:
-```python
-# 노트북에 분산된 계산 로직
-df['RSI'] = ...  # RSI 계산
-df['MACD'] = ...  # MACD 계산
-```
-
-**After**:
-```python
-# 모듈 임포트 & 재사용
-from src.features.technical import calc_rsi, calc_macd
-
-df['feature_rsi_14'] = df.groupby('ticker')['close'].transform(
-    lambda x: calc_rsi(x, period=14)
-)
-```
-
----
-
-### 📚 Documentation
-
-#### 1. 단계별 책임 명확화
-각 단계의 책임을 명확히 정의:
-
-| 단계 | 책임 | Target 포함 |
-|------|------|------------|
-| **01** | API 원시 데이터 수집 | ❌ |
-| **02** | Feature 계산, Meta 생성 | ❌ |
-| **03** | Target 생성, 학습, 예측 | ✅ |
-
-#### 2. Feature Shift 주의사항 문서화
-```python
-# ⚠️ 주의: Feature Shift는 03단계에서만 적용
-# 02단계 출력에는 Shift 적용되지 않음
-
-# ✅ 올바른 사용 (03단계)
-for col in feature_cols:
-    df[col] = df.groupby('ticker')[col].shift(1)
-df = df.dropna(subset=feature_cols)
-
-# ❌ 잘못된 사용 (02단계)
-# Shift를 02단계에서 적용하면 안 됨
-```
-
 ---
 
 ## [2.0.0] - 2024-12-28
 
 ### 🔴 Breaking Changes
 
-#### 1. Feature 명명 규칙 통일
-**변경 사항**:
+#### Feature 명명 규칙 통일
 - 모든 Feature 컬럼에 `feature_` prefix 추가
-
-**마이그레이션**:
-```python
-# v1.x → v2.0
-rename_map = {
-    'ma_5': 'feature_ma_5',
-    'rsi_14': 'feature_rsi_14',
-    'macd': 'feature_macd',
-    ...
-}
-df = df.rename(columns=rename_map)
-```
-
----
-
-### ✨ New Features
-
-#### 1. Universe Meta 컬럼 추가
-- `liquidity_score`, `risk_composite`
-- `is_suspended`, `is_delisted`
-
----
-
-### 🔧 Changed
-
-#### 1. 파일 포맷 변경
-- 01단계: CSV
-- 02단계 이후: Parquet
 
 ---
 
@@ -496,185 +372,35 @@ df = df.rename(columns=rename_map)
 
 ---
 
-## Migration Guides
-
-### v3.1.0 → v3.1.1 (PATCH)
-
-#### Target 위치 변경 처리
-
-**자동 마이그레이션**: 02단계 재실행하면 자동으로 Target 포함됨
-
-```bash
-# 02단계 재실행
-jupyter nbconvert --execute 02_build_dataset.ipynb
-
-# 결과: data/02_processed/{date}/dataset.parquet에 target_log_close 포함
-```
-
-**수동 마이그레이션** (v3.1.0 데이터셋이 있는 경우):
-```python
-import pandas as pd
-import numpy as np
-
-# v3.1.0 데이터셋 로드 (Target 없음)
-df = pd.read_parquet("data/02_processed/{date}/dataset.parquet")
-
-# Target 추가
-df['target_log_close'] = np.where(df['close'] > 1, np.log(df['close']), 0)
-
-# 저장
-df.to_parquet("dataset_v3.1.1.parquet", index=False)
-```
-
----
-
-### v3.0.x → v3.1.0 (MINOR)
-
-#### Step 1: 코드 업데이트
-
-**config.yaml**:
-```yaml
-training:
-  horizons: [1, 2, 3, 4, 5]  # 추가
-  target_col_name: "target_log_close"  # 추가
-```
-
-**03_train_predict.ipynb**:
-```python
-# Before (v3.0.x)
-model = LightGBMModel(...)
-model.fit(X_train, y_train)
-
-# After (v3.1.0)
-model = LightGBMModel(...)
-trainer = WalkForwardTrainer(
-    model=model,
-    horizons=[1, 2, 3, 4, 5],  # Multi-horizon 설정
-    target_col_name='target_log_close'
-)
-results = trainer.run(df, ...)
-```
-
-#### Step 2: 데이터셋 확인
-
-v3.0.x 데이터셋은 v3.1.0과 호환됩니다. 추가 작업 불필요.
-
----
-
-### v2.x → v3.0.0 (MAJOR)
-
-#### Step 1: 02단계 데이터 정리
-```python
-import pandas as pd
-
-# v2.x 데이터 로드
-df = pd.read_parquet("data/02_processed/dataset_v2.parquet")
-
-# Target 컬럼 제거 (v3.0.0에서는 03단계에서 생성)
-target_cols = [c for c in df.columns if c.startswith('target_')]
-if target_cols:
-    print(f"Removing target columns: {target_cols}")
-    df = df.drop(columns=target_cols)
-
-# v3.0.0 형식으로 저장
-df.to_parquet("dataset_v3.parquet", index=False)
-print("✅ Migration complete: v2.x → v3.0.0")
-```
-
-#### Step 2: 03단계 학습 코드 업데이트
-```python
-# v3.0.0 학습 템플릿
-df = pd.read_parquet("data/02_processed/dataset.parquet")
-
-# 1. Target 생성 (v3.0.0 필수)
-df['target_log_close'] = np.log(df['close'])
-
-# 2. Feature Shift (v3.0.0 필수)
-for col in feature_cols:
-    df[col] = df.groupby('ticker')[col].shift(1)
-
-# 3. NaN 제거
-df = df.dropna(subset=feature_cols + ['target_log_close'])
-
-# 4. 학습
-model.fit(df[feature_cols], df['target_log_close'])
-```
-
-#### Step 3: Ticker Feature 제거
-```python
-# ❌ v2.x (사용 금지)
-model = LightGBMModel(
-    feature_list=['ticker', 'feature_ma_5', ...],
-    categorical_features=['ticker']  # ← 제거 필요
-)
-
-# ✅ v3.0.0 (권장)
-model = LightGBMModel(
-    feature_list=['feature_ma_5', 'liquidity_score', ...],
-    categorical_features=[]  # Ticker 없음
-)
-```
-
----
-
-### v1.x → v2.0.0 (MAJOR)
-
-#### Step 1: 컬럼명 변경
-```python
-feature_renames = {
-    'ma_5': 'feature_ma_5',
-    'ma_20': 'feature_ma_20',
-    'rsi_14': 'feature_rsi_14',
-    # ... 모든 Feature 컬럼
-}
-df = df.rename(columns=feature_renames)
-```
-
----
-
 ## Version History Summary
 
 | Version | Date | Type | Key Changes |
 |---------|------|------|-------------|
-| **3.1.1** | 2026-01-21 | 🔵 PATCH | Target 생성 위치 재변경 (03→02), 재현성 강화 |
-| **3.1.0** | 2026-01-21 | 🟢 MINOR | Multi-horizon 예측, Target-Centric Alignment |
-| 3.0.0 | 2026-01-18 | 🔴 MAJOR | Target 생성 위치 변경, Feature Shift, Ticker 제외 |
-| 2.0.0 | 2024-12-28 | 🔴 MAJOR | Feature prefix 통일, Universe Meta 추가 |
+| **3.2.0** | 2026-02-07 | 🟢 MINOR | 04단계(미래예측) + 05단계(유니버스) + 위험도 |
+| **3.1.1** | 2026-01-21 | 🔵 PATCH | Target 위치 재변경 (03→02) |
+| **3.1.0** | 2026-01-21 | 🟢 MINOR | Multi-horizon, Target-Centric Alignment |
+| 3.0.0 | 2026-01-18 | 🔴 MAJOR | Target 위치 변경, Feature Shift, Ticker 제외 |
+| 2.0.0 | 2024-12-28 | 🔴 MAJOR | Feature prefix 통일 |
 | 1.0.0 | 2024-12-01 | - | Initial release |
 
 ---
 
-## Breaking Changes Impact Matrix
+## Breaking Changes Impact Matrix (v3.2.0)
 
-| Change | 01단계 | 02단계 | 03단계 | 모델 | 하위 호환 |
-|--------|--------|--------|--------|------|-----------|
-| **v3.1.1: Target 위치 복귀** | ✅ | ⚠️ | ✅ | ✅ | 🟢 높음 |
-| **v3.1.0: Multi-horizon** | ✅ | ✅ | ⚠️ | ❌ | 🟢 높음 |
-| v3.0.0: Target 위치 변경 | ✅ | ⚠️ | ⚠️ | ❌ | 🟡 보통 |
-| v3.0.0: Feature Shift | ✅ | ✅ | ⚠️ | ❌ | 🟡 보통 |
-| v3.0.0: Ticker 제외 | ✅ | ✅ | ⚠️ | ❌ | 🔴 낮음 |
+| Change | 01단계 | 02단계 | 03단계 | 04단계 | 05단계 | 모델 | 하위 호환 |
+|--------|--------|--------|--------|--------|--------|------|-----------|
+| **v3.2.0: 04+05단계 추가** | ✅ | ✅ | ✅ | 🆕 | 🆕 | ✅ | 🟢 높음 |
 
 **범례**:
 - ✅ 영향 없음
+- 🆕 신규 추가 (하위 호환)
 - ⚠️ 코드 수정 필요
 - ❌ 재학습 필요
 - 🟢 높음: 자동 또는 최소 작업
 - 🟡 보통: 단계별 마이그레이션 필요
-- 🔴 낮음: 전면 재작업 필요
 
 ---
 
-## Notes
-
-- **MAJOR 업데이트 주기**: 분기당 1회 이내
-- **MINOR 업데이트**: 기능 추가 시 즉시 릴리스
-- **PATCH 업데이트**: 버그 수정 및 문서 개선
-- **마이그레이션 지원**: 모든 Breaking Change에 스크립트 제공
-- **테스트 커버리지**: 스키마 변경 시 단위 테스트 필수
-- **문서 우선**: 코드 변경 전 스키마 문서 업데이트
-
----
-
-**Last Updated**: 2026-01-21  
-**Current Version**: 3.1.1  
+**Last Updated**: 2026-02-07  
+**Current Version**: 3.2.0  
 **Maintained by**: SignalWeaver Team
