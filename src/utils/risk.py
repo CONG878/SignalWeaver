@@ -346,3 +346,66 @@ def calculate_sortino_ratio(
         return np.nan
     
     return (mean_return - risk_free_rate) / downside_risk
+
+
+# ==========================================
+# Normalization & Ranking
+# ==========================================
+
+def normalize_risk_scores(
+    df: pd.DataFrame,
+    score_col: str = 'risk_composite_raw',
+    method: str = 'minmax'
+) -> pd.DataFrame:
+    """
+    위험 점수 정규화 및 순위 부여
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        위험 지표가 포함된 DataFrame
+    score_col : str
+        정규화할 원본 점수 컬럼명
+    method : str, default='minmax'
+        정규화 방법 ('minmax', 'zscore')
+        
+    Returns
+    -------
+    pd.DataFrame
+        정규화된 점수 및 순위 컬럼 추가됨
+        - risk_score_normalized: [0, 1] 범위, 높을수록 위험
+        - risk_rank: 위험 순위 (1 = 가장 안전)
+    """
+    df = df.copy()
+    
+    if method == 'minmax':
+        # Min-Max Scaling: [0, 1]
+        min_val = df[score_col].min()
+        max_val = df[score_col].max()
+        
+        if max_val == min_val:
+            df['risk_score_normalized'] = 0.5
+        else:
+            df['risk_score_normalized'] = (
+                (df[score_col] - min_val) / (max_val - min_val)
+            )
+    
+    elif method == 'zscore':
+        # Z-Score 정규화 후 Sigmoid
+        mean_val = df[score_col].mean()
+        std_val = df[score_col].std()
+        
+        if std_val == 0:
+            df['risk_score_normalized'] = 0.5
+        else:
+            z_scores = (df[score_col] - mean_val) / std_val
+            # Sigmoid: (-inf, +inf) → (0, 1)
+            df['risk_score_normalized'] = 1 / (1 + np.exp(-z_scores))
+    
+    else:
+        raise ValueError(f"Unknown normalization method: {method}")
+    
+    # 순위 부여 (낮은 위험 = 1위)
+    df['risk_rank'] = df[score_col].rank(method='min')
+    
+    return df
