@@ -44,8 +44,7 @@ data/03_results/{YYYYMMDD}/forecasts/
 
 **변경 사항**:
 - 3대 평가 지표 기반 투자 종목 선정 파이프라인
-- Hard Constraints + Soft Ranking 2단계 필터링
-- 2가지 전략 제공 (Strategy A: 균형, Strategy B: 확실성)
+- Hard Constraints 필터링
 
 **새로운 파일 구조**:
 ```
