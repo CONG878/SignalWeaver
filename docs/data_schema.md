@@ -277,43 +277,7 @@ Chunk 2: 예측 10~14일 (Chunk 1 예측값 기반)
 | `is_suspended` | 거래정지 여부 |
 | `is_delisted` | 상장폐지 여부 |
 
-### 9.3 최종 평가 점수 (2가지 전략)
-
-#### Strategy A: 가중 선형 결합 (균형)
-
-```python
-final_score = 0.40 × accuracy_score + 0.35 × return_score + 0.25 × safety_score
-```
-
-**특징**:
-- 각 지표가 균형있게 기여
-- 안정적이고 해석 용이
-- 보수적 운용에 적합
-
-#### Strategy B: 신뢰도 가중 (확실성) ⭐
-
-```python
-final_score = expected_return × (confidence^1.5)
-```
-
-**특징**:
-- "확실한 수익"에 집중 (Kelly Criterion)
-- 정확도 낮은 종목 자동 배제
-- 공격적 운용에 적합
-
-**저장 위치**:
-```
-universe_full.parquet:
-  ├── 개별 전략 점수 (score_strategy_a, score_strategy_b)
-  └── 모든 평가 지표 포함
-
-universe_candidates.parquet:
-  ├── return_rank 기준 상위 K개 (기본 전략)
-  ├── 모든 평가 지표 포함
-  └── 최종 선정된 투자 후보
-```
-
-### 9.4 필터링 단계
+### 9.3 필터링 단계
 
 #### Hard Constraints (필수 조건)
 
