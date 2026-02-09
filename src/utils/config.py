@@ -87,7 +87,8 @@ class ProjectPaths:
             meta_dir=Path(paths_cfg['meta_dir']),
             
             # 단계별 경로
-            training_dir=Path(paths_cfg['training_dir']) / ref_date,
+            # 모델은 ref_date가 아닌 model_date 참조
+            training_dir=Path(paths_cfg['training_dir']) / config['universe']['model_date'],
             forecasts_dir=Path(paths_cfg['forecasts_dir']) / ref_date,
             universe_dir=Path(paths_cfg['universe_dir']) / ref_date,
         )
