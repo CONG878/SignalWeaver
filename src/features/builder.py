@@ -126,6 +126,7 @@ def save_processed_data(df: pd.DataFrame, config: dict, ticker_name_map: dict = 
     # 2. 개별 CSV 저장 (디버깅용)
     if config['preprocessing'].get('save_csv', False):
         csv_dir = paths.get_processed_csv_dir()
+        csv_dir.mkdir(parents=True, exist_ok=True)
         print(f"📂 Saving Debug CSVs to {csv_dir}...")
         
         from tqdm import tqdm
