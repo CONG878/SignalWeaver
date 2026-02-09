@@ -8,6 +8,9 @@ Design Principles:
     - 통합 저장: 파이프라인 효율을 위해 전종목 데이터를 하나의 Parquet으로 병합
     - 메타 분리: 종목명 등 메타 정보는 별도 마스터 파일로 관리하여 데이터 중복 방지
     - 유연성: 디버깅을 위한 개별 CSV 저장 옵션 제공
+
+✨ H1+H2 패치 (2026-02-08):
+    - ProjectPaths 클래스 사용으로 경로 관리 중앙화
 """
 
 import time
@@ -46,25 +49,36 @@ def get_ticker_universe(reference_date: str) -> List[Tuple[str, str]]:
 class RawPriceCollector:
     """
     KRX 원시 데이터 수집 및 다중 포맷 저장 클래스
+    
+    ✨ H1+H2 패치: ProjectPaths 기반 경로 관리
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], paths=None):
         """
         Parameters
         ----------
         config : dict
             config.yaml에서 로드된 설정 딕셔너리
+        paths : ProjectPaths, optional
+            경로 객체 (없으면 내부에서 생성)
         """
         self.cfg = config
         self.ref_date = config['project']['reference_date']
         
-        # 경로 설정: data/01_raw/{YYYYMMDD}
-        self.base_dir = Path(config['paths']['raw_dir']) / self.ref_date
-        self.csv_dir = self.base_dir / "csv"
+        # ✨ H2 패치: ProjectPaths 사용
+        if paths is None:
+            from src.utils.config import ProjectPaths
+            self.paths = ProjectPaths.from_config(config)
+        else:
+            self.paths = paths
+        
+        # 경로 설정
+        self.base_dir = self.paths.raw_dir
+        self.csv_dir = self.paths.get_raw_csv_dir()
         
         # 결과 파일 경로
-        self.parquet_path = self.base_dir / f"krx_prices_{self.ref_date}.parquet"
-        self.master_path = self.base_dir / f"ticker_master_{self.ref_date}.csv"
+        self.parquet_path = self.paths.get_raw_parquet()
+        self.master_path = self.paths.get_ticker_master()
         
         # 디렉토리 생성
         self.base_dir.mkdir(parents=True, exist_ok=True)

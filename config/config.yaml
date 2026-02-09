@@ -52,13 +52,25 @@ training:
 universe:
   model_date: "20260206"
 
-# 경로 설정
+# 📂 경로 설정 (H1 패치: 단계별 분리)
 paths:
+  # 기본 경로
   raw_dir: "data/01_raw"
   processed_dir: "data/02_processed"
-  result_dir: "data/03_results"
-  model_dir: "data/04_models"
+  
+  # ✨ H1 패치: 단계별 독립 경로
+  training_dir: "data/03_training"      # Step 3: 학습 검증 예측
+  forecasts_dir: "data/04_forecasts"    # Step 4: 미래 예측
+  universe_dir: "data/05_universe"      # Step 5: 최종 선정
+  
+  # 모델 저장 (Step 3과 연관)
+  model_dir: "data/03_training"         # 학습 단계와 동일 위치
+  
+  # 메타 데이터
   meta_dir: "data/99_meta"
+  
+  # 🔄 하위 호환성 (deprecated, 향후 제거 예정)
+  result_dir: "data/03_training"        # 기존 코드 호환용
 
 # 캘린더 설정
 calendar:

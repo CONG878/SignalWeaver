@@ -98,24 +98,37 @@ def build_universe_meta(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-def save_processed_data(df: pd.DataFrame, config: dict, ticker_name_map: dict = None):
-    """결과 데이터를 날짜별 폴더에 저장 (Parquet + CSV)"""
-    ref_date = config['project']['reference_date']
-    base_dir = Path(config['paths']['processed_dir']) / ref_date
-    base_dir.mkdir(parents=True, exist_ok=True)
+def save_processed_data(df: pd.DataFrame, config: dict, ticker_name_map: dict = None, paths = None):
+    """결과 데이터를 날짜별 폴더에 저장 (Parquet + CSV)
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        저장할 데이터프레임
+    config : dict
+        설정 딕셔너리
+    ticker_name_map : dict, optional
+        종목 코드 → 이름 매핑
+    paths : ProjectPaths, optional
+        경로 관리 객체. 없으면 내부에서 생성
+    """
+    # paths 객체가 없으면 생성
+    if paths is None:
+        from src.utils.config import ProjectPaths
+        paths = ProjectPaths.from_config(config)
     
     # 1. 통합 Parquet 저장
     if config['preprocessing'].get('save_parquet', True):
-        parquet_path = base_dir / "dataset.parquet"
+        parquet_path = paths.get_dataset_parquet()
         df.to_parquet(parquet_path, compression='snappy', index=False)
         print(f"✅ Integrated Parquet Saved: {parquet_path}")
         
     # 2. 개별 CSV 저장 (디버깅용)
     if config['preprocessing'].get('save_csv', False):
-        csv_dir = base_dir / "csv"
-        csv_dir.mkdir(exist_ok=True)
+        csv_dir = paths.get_processed_csv_dir()
         print(f"📂 Saving Debug CSVs to {csv_dir}...")
         
+        from tqdm import tqdm
         for ticker, group in tqdm(df.groupby('ticker'), desc="Saving CSVs"):
             name = ticker_name_map.get(ticker, ticker) if ticker_name_map else ticker
             safe_name = str(name).replace('/', '_').replace('\\', '_')
