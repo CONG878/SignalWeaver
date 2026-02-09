@@ -140,41 +140,91 @@ class WalkForwardTrainer:
         }
 
     def _evaluate(self, df_run: pd.DataFrame, eval_dates: np.ndarray, horizons: List[int]) -> Dict[str, float]:
+        """
+        🔧 수정: 모든 horizon에서 공통으로 유효한 인덱스만 사용하여 평가
+        
+        문제: 각 horizon마다 shift + dropna 하면 유효 행이 달라져 길이 불일치
+        해결: 모든 horizon에 대해 교집합 인덱스를 먼저 찾고, 그것만 사용
+        """
         rmses = []
-        # 컬럼 리스트 구성 시 horizons(리스트)가 아닌 공통 타깃명을 사용
         cols_needed = [self.date_col, 'ticker', self.target_col_name] + self.feature_cols
         base_df = df_run[cols_needed].copy()
         
+        # 1️⃣ 모든 horizon에서 공통으로 유효한 인덱스 찾기
+        valid_indices = None
+        
         for h in horizons:
-            # 모델 식별자 생성 (h1, h2...)
+            temp_df = base_df.copy()
+            for f in self.feature_cols:
+                temp_df[f] = temp_df.groupby('ticker')[f].shift(h)
+            
+            # eval_dates 슬라이싱
+            eval_slice = temp_df[temp_df[self.date_col].isin(eval_dates)]
+            
+            # 이 horizon에서 유효한 인덱스 (NaN 없는 행)
+            h_valid_indices = eval_slice.dropna().index
+            
+            # 교집합 업데이트
+            if valid_indices is None:
+                valid_indices = h_valid_indices
+            else:
+                valid_indices = valid_indices.intersection(h_valid_indices)
+        
+        # 유효 인덱스가 없으면 조기 종료
+        if valid_indices is None or len(valid_indices) == 0:
+            return {'avg_rmse': np.nan, 'samples': 0}
+        
+        # 2️⃣ 공통 인덱스로 각 horizon 평가
+        for h in horizons:
             target_id = f"{self.target_col_name}_h{h}"
             
             temp_df = base_df.copy()
             for f in self.feature_cols:
                 temp_df[f] = temp_df.groupby('ticker')[f].shift(h)
             
-            # 슬라이싱 & 결측 제거
-            eval_df = temp_df[temp_df[self.date_col].isin(eval_dates)].dropna()
-            
-            if len(eval_df) == 0: continue
+            # ✅ 공통 인덱스만 사용 (길이 일치 보장)
+            eval_df = temp_df.loc[valid_indices]
             
             y_true = eval_df[self.target_col_name].values
-            # target_name 인자를 사용하여 해당 시차 전용 모델로 예측
             y_pred = self.model.predict(eval_df[self.feature_cols], target_name=target_id).values
             
             rmses.append(np.sqrt(np.mean((y_true - y_pred) ** 2)))
             
-        return {'avg_rmse': np.mean(rmses) if rmses else np.nan, 'samples': len(eval_dates)}
+        return {'avg_rmse': np.mean(rmses) if rmses else np.nan, 'samples': len(valid_indices)}
 
     def _predict_with_metadata(self, df_run: pd.DataFrame, eval_dates: np.ndarray, horizons: List[int]) -> pd.DataFrame:
-        # 결과용 뼈대
-        eval_base = df_run[df_run[self.date_col].isin(eval_dates)].copy()
-        result = eval_base[[self.date_col, 'ticker', self.base_price_col, self.target_col_name]].copy()
+        """
+        🔧 수정: 공통 유효 인덱스만 사용하여 예측 메타데이터 생성
         
-        # 예측용 베이스 데이터
+        _evaluate와 동일한 로직 적용
+        """
+        # 1️⃣ 모든 horizon에서 공통 유효 인덱스 찾기
         cols_needed = [self.date_col, 'ticker'] + self.feature_cols
         full_base = df_run[cols_needed].copy()
         
+        valid_indices = None
+        
+        for h in horizons:
+            temp_full = full_base.copy()
+            for f in self.feature_cols:
+                temp_full[f] = temp_full.groupby('ticker')[f].shift(h)
+            
+            eval_slice = temp_full[temp_full[self.date_col].isin(eval_dates)]
+            h_valid_indices = eval_slice.dropna().index
+            
+            if valid_indices is None:
+                valid_indices = h_valid_indices
+            else:
+                valid_indices = valid_indices.intersection(h_valid_indices)
+        
+        if valid_indices is None or len(valid_indices) == 0:
+            return pd.DataFrame()
+        
+        # 2️⃣ 결과용 뼈대 (공통 인덱스만)
+        eval_base = df_run.loc[valid_indices].copy()
+        result = eval_base[[self.date_col, 'ticker', self.base_price_col, self.target_col_name]].copy()
+        
+        # 3️⃣ 각 horizon 예측
         for h in horizons:
             target_id = f"{self.target_col_name}_h{h}"
             
@@ -182,12 +232,13 @@ class WalkForwardTrainer:
             for f in self.feature_cols:
                 temp_full[f] = temp_full.groupby('ticker')[f].shift(h)
             
-            eval_slice = temp_full[temp_full[self.date_col].isin(eval_dates)]
+            # ✅ 공통 인덱스만 사용
+            eval_slice = temp_full.loc[valid_indices]
             
-            # 예측 수행 (lightgbm은 NaN이 있어도 모델 내부에서 처리 가능)
+            # 예측 수행
             preds = self.model.predict(eval_slice[self.feature_cols], target_name=target_id)
             
-            # 결과 저장 (target_id를 컬럼명으로 사용)
+            # 결과 저장
             result[f'pred_{target_id}'] = preds.values
             result[f'true_{target_id}'] = eval_base[self.target_col_name].values
             
