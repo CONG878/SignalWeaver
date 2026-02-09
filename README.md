@@ -28,7 +28,7 @@ SignalWeaver/
 │   ├── 01_raw/{YYYYMMDD}/       # Step 1: 원천 데이터 (Parquet + CSV)
 │   ├── 02_processed/{YYYYMMDD}/ # Step 2: Feature + Target 데이터셋
 │   ├── 03_training/{YYYYMMDD}/  # Step 3: 모델 아티팩트(.pkl) + 검증용 과거 예측
-│   ├── 04_forecasts/{YYYYMMDD}/  # Step 4: 미래(Next 5 days) 예측 결과
+│   ├── 04_forecasts/{YYYYMMDD}/ # Step 4: 미래(Next 5 days) 예측 결과
 │   └── 05_universe/{YYYYMMDD}/  # Step 5: 최종 선정된 후보군 및 리포트
 ├── src/                      # 소스 코드 모듈
 │   ├── data_loader/             # 데이터 수집 (Collector)
@@ -112,4 +112,5 @@ SignalWeaver/
 ## 🔜 Next Steps
 
 * **Step 6**: Portfolio Optimization (MVO, Risk Parity)
+
 * **Step 7**: Backtesting & Simulation
