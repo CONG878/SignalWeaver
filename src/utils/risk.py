@@ -4,6 +4,11 @@ Risk assessment utilities
 종목 자체의 내재적 위험 평가 지표
 - 모델 예측 오차와 독립적
 - 시계열 데이터만으로 계산 가능
+
+✨ H4 패치 (2026-02-09): 로그/지수 연산 효율화
+- Drawdown 계산 최적화 (로그 공간 직접 계산)
+- Skewness/Kurtosis 통합 계산 (표준화 1회)
+- VaR/CVaR 통합 계산 (정렬 1회)
 """
 
 import numpy as np
@@ -86,55 +91,57 @@ def calculate_risk_metrics(
         downside_risk = 0.0  # 손실 없음
     
     # ==========================================
-    # 3. VaR (Value at Risk, 95% 신뢰수준)
+    # 3-4. VaR & CVaR (통합 계산)
     # ==========================================
-    var_95 = np.percentile(returns, 5)
-    
-    # ==========================================
-    # 4. CVaR (Conditional VaR, Expected Shortfall)
-    # ==========================================
-    # 최악 5% 평균
-    worst_returns = returns[returns <= var_95]
-    if len(worst_returns) > 0:
-        cvar_95 = np.mean(worst_returns)
+    # ✨ H4 최적화: 정렬을 한 번만 수행
+    if len(returns) > 0:
+        sorted_returns = np.sort(returns)  # 오름차순 정렬
+        var_idx = int(len(sorted_returns) * 0.05)  # 5% 위치
+        
+        # VaR: 5% 분위수
+        var_95 = sorted_returns[var_idx] if var_idx < len(sorted_returns) else sorted_returns[0]
+        
+        # CVaR: 최악 5% 평균
+        if var_idx > 0:
+            cvar_95 = np.mean(sorted_returns[:var_idx])
+        else:
+            cvar_95 = sorted_returns[0]
     else:
-        cvar_95 = var_95
+        var_95 = 0.0
+        cvar_95 = 0.0
     
     # ==========================================
     # 5. 최대 낙폭 (Maximum Drawdown)
     # ==========================================
-    cumulative_returns = np.cumsum(returns)
-    cumulative_wealth = np.exp(cumulative_returns)  # 로그→일반
+    # ✨ H4 최적화: 로그 공간에서 직접 계산
+    # 수학적 근거: DD = (wealth - max_wealth) / max_wealth 
+    #              = wealth/max_wealth - 1
+    #              = exp(log_wealth - log_max_wealth) - 1
+    cumulative_log_wealth = np.cumsum(returns)  # 이미 로그 공간
+    running_max_log = np.maximum.accumulate(cumulative_log_wealth)
     
-    # 누적 최고점
-    running_max = np.maximum.accumulate(cumulative_wealth)
-    
-    # Drawdown 계산
-    drawdown = (cumulative_wealth - running_max) / running_max
+    # 로그 차이 → 비율로 변환 (exp 한 번만 사용)
+    drawdown = np.expm1(cumulative_log_wealth - running_max_log)
     max_drawdown = np.min(drawdown)
     
     # ==========================================
-    # 6. 비대칭도 (Skewness)
+    # 6-7. 비대칭도 & 첨도 (통합 계산)
     # ==========================================
-    # 음수: 하락 쏠림 (왼쪽 꼬리 길음)
-    # 양수: 상승 쏠림 (오른쪽 꼬리 길음)
+    # ✨ H4 최적화: 표준화된 수익률을 한 번만 계산
     mean_return = np.mean(returns)
     std_return = np.std(returns, ddof=1)
     
     if std_return > 0:
-        skewness = np.mean(((returns - mean_return) / std_return) ** 3)
+        # 표준화 (z-score) 한 번만 계산
+        z_scores = (returns - mean_return) / std_return
+        
+        # Skewness: E[(Z)^3]
+        skewness = np.mean(z_scores ** 3)
+        
+        # Excess Kurtosis: E[(Z)^4] - 3
+        excess_kurtosis = np.mean(z_scores ** 4) - 3
     else:
         skewness = 0.0
-    
-    # ==========================================
-    # 7. 첨도 (Kurtosis, Excess Kurtosis)
-    # ==========================================
-    # 높을수록 극단값(Fat Tail) 빈번
-    # 정규분포 기준값 = 3, Excess = Kurtosis - 3
-    if std_return > 0:
-        kurtosis = np.mean(((returns - mean_return) / std_return) ** 4)
-        excess_kurtosis = kurtosis - 3  # Fisher's definition
-    else:
         excess_kurtosis = 0.0
     
     return {

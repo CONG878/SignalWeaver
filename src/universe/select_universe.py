@@ -259,7 +259,7 @@ def evaluate_expected_returns(
             
             # 총 수익률 (검증용)
             total_log_return = log_prices[sell_idx] - log_prices[buy_idx]
-            total_return_pct = (np.exp(total_log_return) - 1) * 100
+            total_return_pct = np.expm1(total_log_return) * 100
             
             # 연율화 수익률 (참고용)
             annualized_return = daily_log_return * 252
@@ -275,7 +275,8 @@ def evaluate_expected_returns(
                 'sell_date': sell_date,
                 'buy_price': buy_price,
                 'sell_price': sell_price,
-                'price_change_pct': (sell_price / buy_price - 1) * 100
+                # ✨ H4 최적화: 이미 계산된 값 재사용 (중복 제거)
+                'price_change_pct': total_return_pct  # 동일 값, 연산 제거
             })
         
         except Exception as e:
