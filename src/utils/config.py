@@ -45,8 +45,8 @@ class ProjectPaths:
     - 타입 안전: IDE 자동완성 지원
     """
     
-    # 기준일
-    reference_date: str
+    reference_date: str # 기준일
+    active_model: str # 현재 활성화된 모델 
     
     # 기본 경로
     raw_dir: Path
@@ -76,10 +76,12 @@ class ProjectPaths:
             초기화된 경로 객체
         """
         ref_date = reference_date or config['project']['reference_date']
+        active_model = config.get('active_model', 'lightgbm') # 기본값 lgbm
         paths_cfg = config['paths']
         
         return cls(
             reference_date=ref_date,
+            active_model=active_model,
             
             # 기본 경로
             raw_dir=Path(paths_cfg['raw_dir']) / ref_date,
@@ -87,10 +89,9 @@ class ProjectPaths:
             meta_dir=Path(paths_cfg['meta_dir']),
             
             # 단계별 경로
-            # 모델은 ref_date가 아닌 model_date 참조
-            training_dir=Path(paths_cfg['training_dir']) / config['universe']['model_date'],
-            forecasts_dir=Path(paths_cfg['forecasts_dir']) / ref_date,
-            universe_dir=Path(paths_cfg['universe_dir']) / ref_date,
+            training_dir=Path(paths_cfg['training_dir']) / config['universe']['model_date'] / active_model,
+            forecasts_dir=Path(paths_cfg['forecasts_dir']) / ref_date / active_model,
+            universe_dir=Path(paths_cfg['universe_dir']) / ref_date / active_model,
         )
     
     # ==========================================
@@ -133,46 +134,13 @@ class ProjectPaths:
         """개별 예측 CSV 디렉토리"""
         return self.training_dir / "csv"
     
-    def get_model_dir(self, model_name: str = None) -> Path:
-        """
-        모델 저장 디렉토리
-        
-        Parameters
-        ----------
-        model_name : str, optional
-            모델명 (예: "lightgbm_multi")
-        
-        Returns
-        -------
-        Path
-            model_name이 있으면 하위 폴더, 없으면 상위 폴더
-        """
-        if model_name:
-            return self.training_dir / model_name
+    def get_model_dir(self) -> Path:
+        """모델 저장 디렉토리 (모델 인자 제거)"""
         return self.training_dir
     
-    def get_model_path(self, model_name: str, pattern: str = "*.pkl") -> Path:
-        """
-        특정 모델 파일 경로 검색
-        
-        Parameters
-        ----------
-        model_name : str
-            모델명
-        pattern : str
-            파일 패턴
-        
-        Returns
-        -------
-        Path
-            첫 번째 매칭 파일 (없으면 예외)
-        
-        Raises
-        ------
-        FileNotFoundError
-            모델 파일이 없을 때
-        """
-        model_dir = self.get_model_dir(model_name)
+    def get_model_path(self, pattern: str = "*.pkl") -> Path:
+        """특정 모델 파일 경로 검색 (인자 제거됨)"""
+        model_dir = self.get_model_dir()
         files = list(model_dir.glob(pattern))
         
         if not files:

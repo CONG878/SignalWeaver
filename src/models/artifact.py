@@ -86,18 +86,12 @@ def save_model_artifact(
         저장된 파일 경로
     """
     if model_dir is None:
-        model_dir = DEFAULT_MODEL_DIR
+        model_dir = DEFAULT_MODEL_DIR / model_name
     
-    # ✨ 중복 방지: model_dir이 이미 model_name을 포함하는지 확인
-    # 예: model_dir = "data/03_training/20260206/lightgbm_multi"
-    #     → model_name = "lightgbm_multi" 중복 생성 방지
-    if model_dir.name == model_name:
-        # 이미 model_name 폴더 안에 있음
-        save_dir = model_dir
-    else:
-        # model_name 하위 폴더 생성 필요
-        save_dir = model_dir / model_name
-    
+    # ✨ 모델 분리: model_dir이 이미
+    # 예: model_dir = "data/03_training/20260206/{model_name}"
+    # 이므로 추가 검사 없이 그대로 사용합니다.
+    save_dir = model_dir
     _ensure_dir(save_dir)
 
     param_hash = _hash_dict(metadata.get("hyperparameters", {}))
