@@ -1,4 +1,4 @@
-﻿# 📄 Data Schema Definition (v3.3.0)
+# 📄 Data Schema Definition (v3.4.0)
 
 본 스키마는 SignalWeaver 프로젝트의 데이터 계약을 정의합니다.
 
@@ -8,20 +8,26 @@
 
 | 속성 | 값 |
 |------|-----|
-| **Schema Version** | `3.3.0` |
-| **Last Updated** | 2026-02-09 |
-| **Latest Changes** | H1(폴더구조) + H2(경로중앙화) + H3(모듈정리) |
-| **Compatibility** | v3.2.x 부분 호환 (폴더 마이그레이션 필요) |
+| **Schema Version** | `3.4.0` |
+| **Last Updated** | 2026-02-17 |
+| **Latest Changes** | 모델 다양화 - RF 모델 도입 + 앙상블 학습 |
+| **Compatibility** | v3.3.x 부분 호환 (모델 폴더 계층 추가) |
 
 ---
 
 ## 🔄 최근 변경 이력 요약
 
+### v3.4.0 (2026-02-17) - 🟢 MINOR
+- **모델 다양화**: RandomForest 모델 + 앙상블 학습 도입
+  - LightGBM 외 RandomForest 멀티아웃풋 모델 추가
+  - 03b_train_ensemble.ipynb: OOF 기반 가중치 최적화
+  - 03_training/{date}/ → 03_training/{date}/{model_name}/ 계층 확장
+  - config.yaml: randomforest_params + active_model 옵션 추가
+
 ### v3.3.0 (2026-02-09) - 🟢 MINOR
 - **H1 (폴더 구조 개선)**: `data/03_results/` 분해 → `03_training/`, `04_forecasts/`, `05_universe/` 독립
 - **H2 (경로 중앙화)**: `ProjectPaths` 클래스 도입 → 모든 노트북 경로 관리 통일
 - **H3 (모듈 정리)**: `src/universe/select_universe.py` Facade Pattern 적용
-- **하위 호환**: 부분 (폴더 마이그레이션 필요, 파일 포맷 변경 없음)
 
 ### v3.2.1 (2026-02-09) - 🔵 PATCH
 - **Critical**: Multi-Horizon Walk-Forward 데이터 누수 버그 수정
@@ -30,11 +36,10 @@
 ### v3.2.0 (2026-02-07) - 🟢 MINOR
 - **04단계 추가**: Recursive Extension을 이용한 미래 주가 예측
 - **05단계 추가**: 3대 평가 지표(정확도/수익성/리스크) 기반 유니버스 선정
-- **새로운 데이터 구조**: 예측 결과, 위험 지표, 종합 점수 등
 
 ---
 
-## 📌 파일 저장 규칙 / 포맷 (Updated v3.3.0)
+## 📌 파일 저장 규칙 / 포맷 (Updated v3.4.0)
 
 ### 1.1 기본 포맷
 
@@ -42,11 +47,11 @@
 |------|------|------|------|
 | **01단계 (Raw)** | `data/01_raw/{date}/` | CSV + 통합 Parquet | API 원본 보존 + 파이프라인 효율성 |
 | **02단계 (Processed)** | `data/02_processed/{date}/` | Parquet + 선택적 CSV | 고속 I/O + 디버깅 지원 |
-| **03단계 (Training)** | `data/03_training/{date}/` | 🆕 Parquet + 개별 CSV | 학습 검증 예측 (과거 데이터) |
-| **04단계 (Forecasts)** | `data/04_forecasts/{date}/` | 🆕 Parquet + 선택적 CSV | 미래 예측값 저장 |
-| **05단계 (Universe)** | `data/05_universe/{date}/` | 🆕 Parquet + CSV + JSON | 투자 후보 선정 결과 |
+| **03단계 (Training)** | `data/03_training/{date}/{model_name}/` | 🔄 Updated: Parquet + 모델별 폴더 | 모델 분리 + 메타데이터 관리 |
+| **04단계 (Forecasts)** | `data/04_forecasts/{date}/` | Parquet + 선택적 CSV | 미래 예측값 저장 |
+| **05단계 (Universe)** | `data/05_universe/{date}/` | Parquet + CSV + JSON | 투자 후보 선정 결과 |
 
-### 1.2 파일 네이밍 규칙 (v3.3.0)
+### 1.2 파일 네이밍 규칙 (v3.4.0)
 
 ```
 # 01단계: 원시 데이터
@@ -60,19 +65,38 @@ data/02_processed/{YYYYMMDD}/
   ├── dataset.parquet                   # 통합 Feature 데이터셋
   └── csv/{종목명}.csv                  # 개별 CSV (옵션)
 
-# 03단계: 학습 검증 예측 (H1 변경: 03_results → 03_training)
+# 03단계: 학습 검증 예측 (H4 v3.4.0: 모델별 폴더 분리)
 data/03_training/{YYYYMMDD}/
-  ├── *.pkl                             # 모델 아티팩트
-  ├── registry.json                     # 모델 registry
-  ├── predictions.parquet               # 과거 예측 결과
-  └── csv/{종목명}.csv                  # 개별 CSV (옵션)
+  ├── lightgbm/                         # ✨ LightGBM 전용 폴더
+  │   ├── v1_lgbm_20260213_abc123.pkl  # LightGBM Booster 객체
+  │   ├── registry.json                # 메타데이터
+  │   └── predictions.parquet          # OOF 검증 예측값
+  │
+  ├── randomforest/                    # ✨ RandomForest 전용 폴더
+  │   ├── v1_rf_20260213_def456.pkl    # MultiOutputRegressor 객체
+  │   ├── registry.json                # 메타데이터
+  │   └── predictions.parquet          # OOF 검증 예측값
+  │
+  └── ensemble/                        # ✨ 앙상블 모델 폴더
+      ├── v1_ens_20260213_ghi789.pkl   # EnsembleModel 객체 (가중치 포함)
+      ├── registry.json                # 메타데이터
+      └── predictions.parquet          # 블렌딩된 예측값
 
-# 04단계: 미래 예측 (H1 변경: results/forecasts → 04_forecasts)
+# 04단계: 미래 예측
 data/04_forecasts/{YYYYMMDD}/
-  ├── future_forecasts.parquet          # 통합 미래 예측값
-  └── csv/{종목명}_forecast.csv         # 개별 CSV (옵션)
+  ├── lightgbm/
+  │   ├── future_forecasts.parquet         # LightGBM 미래 예측값
+  │   └── csv/{종목명}_forecast.csv         # 종목별 CSV (옵션)
+  │
+  ├── randomforest/
+  │   ├── future_forecasts.parquet         # RandomForest 미래 예측값
+  │   └── csv/{종목명}_forecast.csv         # 종목별 CSV (옵션)
+  │
+  └── ensemble/
+      ├── future_forecasts.parquet         # 앙상블 미래 예측값
+      └── csv/{종목명}_forecast.csv         # 종목별 CSV (옵션)
 
-# 05단계: 유니버스 선정 (H1 변경: results/universe → 05_universe)
+# 05단계: 유니버스 선정
 data/05_universe/{YYYYMMDD}/
   ├── universe_full.parquet             # 전체 평가 완료 종목
   ├── universe_candidates.parquet       # Top-K 후보
@@ -91,481 +115,400 @@ data/99_meta/
 
 모든 단계에서 공통으로 사용되는 필수 컬럼입니다.
 
-| 컬럼명 | 타입 | 설명 | 필수 여부 |
-|--------|------|------|-----------|
-| `date` | date | 거래일 (YYYY-MM-DD) | ✅ |
-| `ticker` | string | 종목 코드 (6자리) | ✅ |
-| `open` | float | 시가 | ✅ |
-| `high` | float | 고가 | ✅ |
-| `low` | float | 저가 | ✅ |
-| `close` | float | 종가 | ✅ |
-| `volume` | int64 | 거래량 | ✅ |
+| 컬럼 | 타입 | 설명 | 예시 |
+|------|------|------|------|
+| **date** | datetime64 | 거래일 | 2024-01-15 |
+| **ticker** | str | 종목 코드 | 005930 |
+| **close** | float64 | 종가 | 70500.0 |
 
 ---
 
-## 📌 3. Feature 스키마 (feature_ prefix)
+## 📌 3. Step 1 (Raw Data) - 입력 스키마
 
-### 3.1 가격 기반 기본 지표
-
-| 컬럼명 | 설명 |
-|--------|------|
-| `feature_ma_5` | 5일 단순 이동평균 |
-| `feature_ma_20` | 20일 단순 이동평균 |
-| `feature_ma_60` | 60일 단순 이동평균 |
-| `feature_volatility_20` | 20일 수익률 표준편차 |
-
-### 3.2 기술적 지표 (Technical Indicators)
-
-| 컬럼명 | 설명 |
-|--------|------|
-| `feature_rsi_14` | RSI (Relative Strength Index) |
-| `feature_macd` | MACD 값 |
-| `feature_macd_signal` | MACD 시그널 |
-| `feature_macd_hist` | MACD 히스토그램 |
-| `feature_bb_upper` | 볼린저 상단 |
-| `feature_bb_middle` | 볼린저 중심선 |
-| `feature_bb_lower` | 볼린저 하단 |
-| `feature_volume_ratio` | 거래량 비율 |
-
----
-
-## 📌 4. Universe Meta (운영 판단용 지표)
-
-02단계에서 생성되며, **학습 Feature 및 운영 필터링**에 활용됩니다.
-
-| 컬럼명 | 타입 | 설명 |
-|--------|------|------|
-| `liquidity_score` | float | 유동성 점수 (20일 평균 거래대금) |
-| `risk_composite` | float | 복합 리스크 점수 (0~1) |
-| `is_suspended` | int | 거래정지 여부 (0: 정상, 1: 정지) |
-| `is_delisted` | int | 상장폐지 여부 (0: 정상, 1: 폐지) |
-
----
-
-## 📌 5. Target (타겟) 스키마
-
-### 5.1 Target 정의 (v3.1.1 규칙 유지)
+### 3.1 OHLCV 데이터
 
 ```python
-# 02단계에서 생성
-df['target_log_close'] = np.log(df['close'])
-```
+# 컬럼 정의 (FinanceDataReader 표준)
+columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
 
-### 5.2 Target 컬럼
+# 타입
+dtypes = {
+    'Date': 'datetime64[ns]',    # 거래일
+    'Open': 'float64',            # 시가
+    'High': 'float64',            # 고가
+    'Low': 'float64',             # 저가
+    'Close': 'float64',           # 종가
+    'Volume': 'float64'           # 거래량
+}
 
-| 컬럼명 | 타입 | 설명 | 생성 위치 |
-|--------|------|------|-----------|
-| `target_log_close` | float | 로그 종가 (기준 타깃) | **02단계** |
-
----
-
-## 📌 6. Multi-Horizon 예측 구조 (v3.1.0 규칙 유지)
-
-### 6.1 개념
-
-기존의 단일 시점 예측 대신, **한 번의 학습으로 5일치(1주일) 가격을 동시에 예측**합니다.
-
-```
-입력 (t-5일 피처) → 모델 → 출력 (t일 가격 예측)
-입력 (t-4일 피처) → 모델 → 출력 (t일 가격 예측)
-...
-입력 (t-1일 피처) → 모델 → 출력 (t일 가격 예측)
-```
-
-### 6.2 Horizon 정의
-
-| Horizon | 의미 | 학습 시 Feature 시점 |
-|---------|------|---------------------|
-| h=1 | 1일 앞 예측 | t-1일 |
-| h=2 | 2일 앞 예측 | t-2일 |
-| h=3 | 3일 앞 예측 | t-3일 |
-| h=4 | 4일 앞 예측 | t-4일 |
-| h=5 | 5일 앞 예측 | t-5일 |
-
----
-
-## 📌 7. 모델 예측 결과 스키마 (03단계 - Training)
-
-### 7.1 Multi-Horizon 예측 출력
-
-| 컬럼명 | 설명 |
-|--------|------|
-| `date` | 예측 대상 날짜 (타깃 시점) |
-| `ticker` | 종목 코드 |
-| `close` | 실제 종가 (원화) |
-| `target_log_close` | 실제 로그 종가 (공통 정답) |
-| `pred_target_log_close_h1` | h=1 예측값 (로그) |
-| `pred_target_log_close_h2` | h=2 예측값 (로그) |
-| ... | ... |
-| `pred_target_log_close_h5` | h=5 예측값 (로그) |
-| `true_target_log_close_h1` | h=1 정답값 (참조용) |
-
-**저장 위치** (v3.3.0):
-- 통합: `data/03_training/{ref_date}/predictions.parquet`
-- 개별: `data/03_training/{ref_date}/csv/{종목명}.csv`
-
----
-
-## 📌 8. 미래 예측 결과 스키마 (04단계 - Forecasts)
-
-### 8.1 Recursive Extension 출력
-
-| 컬럼명 | 타입 | 설명 |
-|--------|------|------|
-| `date` | date | 예측 대상 날짜 |
-| `ticker` | string | 종목 코드 |
-| `horizon` | int | 예측 시차 (1~5) |
-| `chunk_idx` | int | Recursive 단계 (0, 1, 2, ...) |
-| `pred_log_close` | float | 예측 로그 종가 |
-| `pred_close` | float | 예측 종가 (원화) |
-
-### 8.2 Chunk 기반 구조
-
-```
-Chunk 0: 예측 0~4일 (t-1 ~ t-5 Feature 사용)
-Chunk 1: 예측 5~9일 (Chunk 0 예측값을 Feature처럼 사용)
-Chunk 2: 예측 10~14일 (Chunk 1 예측값 기반)
-...
-```
-
-**저장 위치** (v3.3.0):
-- 통합: `data/04_forecasts/{ref_date}/future_forecasts.parquet`
-- 개별: `data/04_forecasts/{ref_date}/csv/{종목명}_forecast.csv` (선택)
-
-### 8.3 Recursive Extension의 오차 누적
-
-⚠️ **주의**: 뒤로 갈수록 오차 증가
-- Chunk 0: 낮은 오차 (실제 Feature 기반)
-- Chunk 1: 중간 오차 (Chunk 0 예측값 기반)
-- Chunk 2+: 높은 오차 (예측값 체인)
-
-**권장사항**:
-- 거래: Chunk 0~1만 신뢰 (최대 10일)
-- 분석: Chunk 2+ 참고용 (확률 낮음)
-
-**🆕 v3.2.1**: Chunk 오염 방지 (volume 평균값 사용)
-
----
-
-## 📌 9. 유니버스 선정 결과 스키마 (05단계 - Universe)
-
-### 9.1 평가 지표 (3대 축)
-
-#### A. 정확도 (Accuracy, 과거 기반)
-
-| 컬럼명 | 설명 |
-|--------|------|
-| `rmse` | 과거 예측의 오차(RMSE) |
-| `mae` | 평균 절대 오차 |
-| `directional_accuracy` | 상승/하락 방향 적중률 (0~1) |
-| `confidence_rmse` | RMSE 역수 기반 신뢰도 (높을수록 정확) |
-| `accuracy_rank` | 정확도 순위 (낮을수록 정확) |
-
-#### B. 수익성 (Return, 미래 기반)
-
-| 컬럼명 | 설명 |
-|--------|------|
-| `daily_log_return` | 시간당 로그 수익률 (복리 기반) |
-| `total_log_return` | 총 로그 수익률 |
-| `total_return_pct` | 총 수익률 (%) |
-| `hold_days` | 최적 보유 기간 (일) |
-| `buy_date` | 최적 매수일 |
-| `sell_date` | 최적 매도일 |
-| `buy_price` | 예상 매수가 |
-| `sell_price` | 예상 매도가 |
-| `return_rank` | 수익률 순위 (낮을수록 높은 수익 기대) |
-
-#### C. 위험도 (Risk, 미래 기반)
-
-| 컬럼명 | 설명 |
-|--------|------|
-| `volatility` | 변동성 (로그 수익률 표준편차) |
-| `downside_risk` | 하방 위험 (음수 수익률만) |
-| `var_95` | VaR (5% 분위수) |
-| `cvar_95` | CVaR (최악 5% 평균) |
-| `max_drawdown` | 최대 낙폭 |
-| `skewness` | 비대칭도 (음수면 하락 쏠림) |
-| `kurtosis` | 초과 첨도 (Fat Tail 지표) |
-| `risk_composite_raw` | 복합 리스크 점수 (원점수) |
-| `risk_score_normalized` | 정규화 리스크 점수 (0~1) |
-| `risk_rank` | 위험 순위 (낮을수록 안전) |
-
-### 9.2 메타 정보
-
-| 컬럼명 | 설명 |
-|--------|------|
-| `ticker` | 종목 코드 |
-| `liquidity_score` | 유동성 점수 |
-| `is_suspended` | 거래정지 여부 |
-| `is_delisted` | 상장폐지 여부 |
-
-### 9.3 필터링 단계
-
-#### Hard Constraints (필수 조건)
-
-| 필터 | 제거 대상 | 기준 |
-|------|-----------|------|
-| 거래정지/상폐 | `is_suspended=1`, `is_delisted=1` | 매매 불가능 |
-| 저유동성 | 평균 거래대금 < 5천만 원 | 체결 불가 위험 |
-| 고위험 | `risk_composite_raw` > 0.8 | 손실 위험 높음 |
-| 저정확도 | `accuracy_rank` > 1000 | 예측 신뢰도 낮음 |
-
-#### Soft Ranking (점수 기반)
-
-- Strategy A 또는 B로 점수화
-- 상위 Top-K 선정
-
----
-
-## 📌 10. 단계별 데이터 흐름 (v3.3.0 폴더 구조 포함)
-
-### 10.1 전체 파이프라인 (Updated)
-
-```mermaid
-graph LR
-    A["01_collect"] --> B["02_build_dataset"]
-    B --> C["03_train_predict"]
-    C --> D["04_forecast_future"]
-    D --> E["05_universe_selection"]
-    
-    A:::step1
-    B:::step2
-    C:::step3
-    D:::step4
-    E:::step5
-    
-    classDef step1 fill:#e3f2fd
-    classDef step2 fill:#fff3e0
-    classDef step3 fill:#f3e5f5
-    classDef step4 fill:#fce4ec
-    classDef step5 fill:#e0f2f1
-```
-
-### 10.2 단계별 책임 분리 (Updated)
-
-| 단계 | 입력 | 처리 | 출력 | 폴더 (v3.3.0) | Target 생성 |
-|------|------|------|------|-------------|-------------|
-| **01** | - | API 수집 | Raw OHLCV | `01_raw` | ❌ |
-| **02** | Raw OHLCV | Feature 계산 + **Target 생성** | Feature + Meta + Target | `02_processed` | ✅ |
-| **03** | Feature + Target | Multi-horizon 학습 + 예측 | 모델 + 예측 | `03_training` | ❌ |
-| **04** | 모델 + Feature | Recursive Extension | 미래 5~60일 예측 | `04_forecasts` | ❌ |
-| **05** | 예측값 + 메타 | 평가 + 필터링 + 점수화 | 투자 후보 + 지표 | `05_universe` | ❌ |
-
-### 10.3 데이터 변환 과정 (Updated)
-
-```
-[01단계]
-ticker, date, open, high, low, close, volume
-
-[02단계]
-+ feature_ma_5, feature_rsi_14, ...
-+ liquidity_score, risk_composite, ...
-+ target_log_close
-
-[03단계]
-각 Horizon별로:
-  - Feature를 h일 과거로 Shift
-  - Multi-horizon 학습
-  
-결과: pred_target_log_close_h1~h5
-📁 저장: data/03_training/{date}/
-
-[04단계] 
-Recursive Extension 반복:
-  - Chunk 0: t-1~t-5 Feature → t+0~t+4 예측
-  - Chunk 1: Chunk0 + Feature → t+5~t+9 예측
-  - ...
-  
-결과: future_forecasts (t+1 ~ t+60)
-📁 저장: data/04_forecasts/{date}/
-
-[05단계] 
-3대 평가 지표 계산:
-  - 정확도: 과거 예측 오차 (model_train_date 기준)
-  - 수익성: 예측 수익률 (forecast_date 기준)
-  - 위험: 예측값 변동성 (내재 리스크)
-  
-결과: universe_full + candidates
-📁 저장: data/05_universe/{date}/
+# 인덱스
+index.name = 'ticker'  # 종목 코드
 ```
 
 ---
 
-## 📌 11. H2 패치: ProjectPaths 클래스 (v3.3.0)
+## 📌 4. Step 2 (Processed) - Feature + Target 스키마
 
-### 11.1 사용 방식
+### 4.1 Feature 카테고리
+
+#### 가격 관련 (Price)
+- `feature_log_close`: log(Close)
+- `feature_log_return_1d`: log(Close / Close_shift_1)
+- `feature_close_shift_{d}`: d일 전 종가
+
+#### 기술적 지표 (Technical)
+- `feature_ma_5`, `feature_ma_60`: 5일/60일 이동평균
+- `feature_rsi_14`: RSI(14) 지표
+- `feature_volatility_5`: 5일 변동성
+
+#### 거래량 지표 (Liquidity)
+- `feature_volume_ma_5`: 5일 평균 거래량
+- `liquidity_score`: 거래량 기반 유동성 점수
+
+#### 복합 지표 (Meta)
+- `risk_composite`: 종합 위험 지표
+- `trend_score`: 추세 강도
+
+### 4.2 Target 스키마
 
 ```python
-# Before (모든 노트북에서 수동 조립)
-raw_dir = Path("data/01_raw") / ref_date
-result_dir = Path("data/03_results") / ref_date / "predictions"
+# Target: 로그 종가의 t일 뒤 값
+target_col = f"target_log_close_h{horizon}"
 
-# After (통일된 인터페이스)
-from src.utils.config import load_config, ProjectPaths
+# 예시 (horizon=[1, 2, 3, 4, 5])
+target_log_close_h1  # t+1일의 log(Close)
+target_log_close_h2  # t+2일의 log(Close)
+target_log_close_h3  # t+3일의 log(Close)
+target_log_close_h4  # t+4일의 log(Close)
+target_log_close_h5  # t+5일의 log(Close)
 
-cfg = load_config()
-paths = ProjectPaths.from_config(cfg)
-
-# 각 단계의 경로는 메서드로 통일
-raw_parquet = paths.get_raw_parquet()
-dataset = paths.get_dataset_parquet()
-predictions = paths.get_predictions_parquet()  # 03_training
-forecasts = paths.get_forecasts_parquet()      # 04_forecasts
-universe = paths.get_universe_candidates()     # 05_universe
+# Alignment: 03_training에서 사용
+# 학습 샘플: X_t → y_t (과거 데이터로 미래 예측)
 ```
 
-### 11.2 ProjectPaths 제공 메서드
+### 4.3 메타 컬럼 (Meta)
 
-| 메서드 | 반환값 | 설명 |
-|--------|--------|------|
-| `get_raw_parquet()` | Path | 01단계 통합 Parquet |
-| `get_dataset_parquet()` | Path | 02단계 Feature 데이터셋 |
-| `get_predictions_parquet()` | Path | 03단계 예측 결과 |
-| `get_forecasts_parquet()` | Path | 04단계 미래 예측 |
-| `get_universe_candidates()` | Path | 05단계 Top-K 후보 |
-| `ensure_dirs()` | None | 모든 출력 폴더 자동 생성 |
+```python
+# 추적용 컬럼
+'date'              # 거래일
+'ticker'            # 종목코드
+'price_current'     # 종가 (원본)
+'volume'            # 거래량 (원본)
+```
 
 ---
 
-## 📌 12. 핵심 개념: 이중 날짜 기준 (05단계)
+## 📌 5. Step 3 (Training) - 모델 & OOF 예측 스키마 (v3.4.0)
 
-### 12.1 정확도 평가 날짜
-
-```
-model_train_date: 2026-01-20 (학습 기준일)
-  ↓
-  [정확도 평가]
-  - 이전 예측값: 실제값과 비교 가능 (과거 데이터)
-  - 지표: RMSE, MAE, 방향성 정확도
-```
-
-### 12.2 수익성 평가 날짜
+### 5.1 폴더 구조
 
 ```
-forecast_date: 2026-02-07 (투자 결정 시점)
-  ↓
-  [수익성 평가]
-  - 미래 예측값: 정답 없음 (예측값만 존재)
-  - 지표: 예상 수익률, 최적 매매 시점
+data/03_training/{YYYYMMDD}/
+├── lightgbm/
+│   ├── v1_lgbm_20260213_abc123.pkl   # LightGBMModel 객체
+│   ├── registry.json                 # 메타데이터
+│   └── predictions.parquet           # OOF 검증 결과
+│
+├── randomforest/                     # ✨ NEW
+│   ├── v1_rf_20260213_def456.pkl     # RandomForestMultiModel 객체
+│   ├── registry.json
+│   └── predictions.parquet
+│
+└── ensemble/                         # ✨ NEW
+    ├── v1_ens_20260213_ghi789.pkl    # EnsembleModel 객체
+    ├── registry.json
+    └── predictions.parquet           # 블렌딩 결과
 ```
 
-**중요**: 두 날짜는 다르며, 각각 다른 데이터 세트 사용
+### 5.2 OOF 예측 결과 (predictions.parquet)
+
+```python
+# 컬럼 구성
+columns = [
+    'date', 'ticker',                      # 메타 (인덱싱용)
+    
+    # 예측값 (5 horizons)
+    'pred_target_log_close_h1',
+    'pred_target_log_close_h2',
+    'pred_target_log_close_h3',
+    'pred_target_log_close_h4',
+    'pred_target_log_close_h5',
+    
+    # 정답값 (검증용)
+    'true_target_log_close_h1',
+    'true_target_log_close_h2',
+    'true_target_log_close_h3',
+    'true_target_log_close_h4',
+    'true_target_log_close_h5',
+    
+    # 추가 메타
+    'train_date',
+    'valid_fold',
+]
+
+# 크기: (n_samples, 13) → walk-forward 검증 결과
+# NaN 처리: dropna() 후 저장
+```
+
+### 5.3 Registry 메타데이터 (registry.json)
+
+```json
+{
+  "model_name": "lightgbm_multi",
+  "model_version": "v1_lgbm_20260213_abc123",
+  "created_date": "2026-02-13T10:30:00",
+  "hyperparameters": {
+    "num_leaves": 31,
+    "learning_rate": 0.05,
+    "n_estimators": 100
+  },
+  "training_metrics": {
+    "rmse_h1": 0.0234,
+    "rmse_h2": 0.0312,
+    "mae_all": 0.0189
+  },
+  "feature_count": 48,
+  "target_columns": ["pred_target_log_close_h1", ..., "pred_target_log_close_h5"]
+}
+```
+
+### 5.4 모델 객체 명세
+
+#### LightGBMModel (.pkl)
+```python
+# Pickle된 객체 구조
+class LightGBMModel:
+    model_name: str = "lightgbm_multi"
+    model_version: str
+    model: lgb.Booster           # LightGBM Booster
+    feature_list: List[str]      # 학습에 사용된 Feature 이름
+    target_columns: List[str]    # ['pred_target_log_close_h1', ..., 'h5']
+    is_fitted: bool = True
+```
+
+#### RandomForestMultiModel (.pkl) - ✨ NEW
+```python
+# Pickle된 객체 구조
+class RandomForestMultiModel:
+    model_name: str = "randomforest_multi"
+    model_version: str
+    model: MultiOutputRegressor  # sklearn.ensemble 래퍼
+    feature_list: List[str]      # 학습에 사용된 Feature 이름
+    target_columns: List[str]    # ['pred_target_log_close_h1', ..., 'h5']
+    is_fitted: bool = True
+```
+
+#### EnsembleModel (.pkl) - ✨ NEW
+```python
+# Pickle된 객체 구조
+class EnsembleModel:
+    model_name: str = "ensemble"
+    model_version: str
+    models: List[ModelBase]      # [LightGBMModel, RandomForestMultiModel, ...]
+    weights: List[float]         # [0.3, 0.7, ...]
+    target_columns: List[str]    # 상속받은 메타데이터
+    feature_list: List[str]      # 상속받은 메타데이터
+    is_fitted: bool = True
+```
 
 ---
 
-## 📌 13. 스키마 버전 관리 정책
+## 📌 6. Step 3b (Ensemble Training) - 새로운 노트북 (v3.4.0)
+
+### 6.1 목표
+- 개별 모델(LGBM, RF)의 OOF 예측값 결합
+- Scipy.optimize로 최적 가중치 탐색
+- 블렌딩된 앙상블 모델 저장
+
+### 6.2 실행 흐름
+
+```
+Input: 
+  ├── data/03_training/{date}/lightgbm/predictions.parquet
+  └── data/03_training/{date}/randomforest/predictions.parquet
+
+Process:
+  [1] OOF 로드 → numpy 배열 변환
+  [2] Scipy.minimize: RMSE 최소화
+      - 목표: minimize(RMSE(w1*pred_lgbm + w2*pred_rf))
+      - 제약: w1 + w2 = 1.0, 0 ≤ w1, w2 ≤ 1.0
+  [3] EnsembleModel 생성 (가중치 포함)
+  [4] 블렌딩 예측값 생성
+
+Output:
+  ├── data/03_training/{date}/ensemble/v1_ens_*.pkl
+  ├── data/03_training/{date}/ensemble/registry.json
+  └── data/03_training/{date}/ensemble/predictions.parquet
+```
+
+---
+
+## 📌 7. Step 4 (Forecasts) - 미래 예측 결과 스키마
+
+```
+data/04_forecasts/{YYYYMMDD}/
+├── lightgbm/
+│   ├── future_forecasts.parquet
+│   │   columns: [
+│   │       'date', 'ticker',                  # 메타
+│   │       'forecast_date',                   # 예측 시점
+│   │       'target_horizon_days',             # 예측 일수 (1~60)
+│   │       'pred_target_log_close',           # 예측값
+│   │       'confidence_interval_lower',       # CI 하한
+│   │       'confidence_interval_upper'        # CI 상한
+│   │   ]
+│   │
+│   └── csv/{종목명}_forecast.csv              # 종목별 CSV (선택)
+│
+├── randomforest/                     # ✨ NEW
+│   ├── future_forecasts.parquet
+│   │   columns: [
+│   │       ...
+│   │   ]
+│   │
+│   └── csv/{종목명}_forecast.csv
+│
+└── ensemble/                         # ✨ NEW
+    ├── future_forecasts.parquet
+    │   columns: [
+    │       ...
+    │   ]
+    │
+    └── csv/{종목명}_forecast.csv
+```
+
+---
+
+## 📌 8. Step 5 (Universe) - 최종 선정 결과 스키마
+
+### 8.1 universe_full.parquet
+```python
+# 모든 종목의 종합 평가 결과
+columns = [
+    'ticker', 'name',              # 메타
+    'accuracy_score',              # 정확도 지표 (0~1)
+    'profitability_score',         # 수익성 지표 (0~1)
+    'risk_composite',              # 위험 지표 (0~1)
+    'composite_score',             # 종합 점수
+    'selected'                     # 선정 여부
+]
+```
+
+### 8.2 universe_candidates.parquet
+```python
+# Top-K 후보
+columns = [
+    'ticker', 'name',
+    'composite_score',
+    'rank',
+    'recommendation'               # 'BUY', 'HOLD', 'SELL'
+]
+```
+
+---
+
+## 📌 9. Step 2~5 데이터 흐름
+
+### 9.1 전체 파이프라인
+
+```
+[02 Processed]
+├─ Feature dataset
+│
+└─→ [03 Training]
+    ├─ 03_train_predict.ipynb
+    │  └─ active_model = "lightgbm" | "randomforest"
+    │     └─ Individual model OOF
+    │
+    └─ 03b_train_ensemble.ipynb (Optional)
+       └─ Blend OOF → Ensemble model
+       
+└─→ [04 Forecasts]
+    └─ 04_forecast_future.ipynb
+       └─ Load model (active_model) → Recursive Extension
+       
+└─→ [05 Universe]
+    └─ 05_universe_selection.ipynb
+       └─ Evaluate + Filter + Rank
+```
+
+---
+
+## 📌 10. 모델 선택 메커니즘 (v3.4.0)
+
+### 10.1 config.yaml 설정
+
+```yaml
+# 모델 선택
+active_model: "ensemble"  # 'lightgbm', 'randomforest', 'ensemble'
+
+training:
+  # LightGBM 파라미터
+  lgbm_params:
+    num_leaves: 31
+    learning_rate: 0.05
+    # ...
+  
+  # RandomForest 파라미터 (NEW)
+  randomforest_params:
+    n_estimators: 40
+    max_depth: 8
+    min_samples_split: 10
+    # ...
+```
+
+### 10.2 노트북별 동작
+
+| 노트북 | 03_train_predict | 03b_train_ensemble | 04_forecast_future |
+|--------|-----------------|------------------|-----------------|
+| **lightgbm** | LGBM 학습 | ⏭️ Skip | LGBM 로드 후 추론 |
+| **randomforest** | RF 학습 | ⏭️ Skip | RF 로드 후 추론 |
+| **ensemble** | LGBM + RF 학습 | 가중치 최적화 | Ensemble 로드 후 추론 |
+
+---
+
+## 📌 11. 호환성 노트
+
+### v3.3.0 → v3.4.0 마이그레이션
+
+**기존 모델 호환성**:
+- v3.3.0에서 저장한 LightGBM 모델은 v3.4.0에서 자동 호환
+- 폴더 구조: 기존 flat 구조도 인식 가능 (backward compatibility)
+
+**신규 기능**:
+- RandomForest 모델 추가
+- 앙상블 학습 (03b_train_ensemble.ipynb) 선택사항
+
+---
+
+## 🔍 스키마 버전 관리 정책
 
 ### Semantic Versioning
 
 ```
 schema_version: "MAJOR.MINOR.PATCH"
 
-예: "3.3.0"
-    │  │  └─ PATCH: 버그 수정 (3.2.1)
-    │  └──── MINOR: 구조 개선 (3.3.0 - H1+H2+H3)
-    └─────── MAJOR: 근본 구조 변경 (v2→v3)
+예: "3.4.0"
+    │  │  └─ PATCH: 버그 수정
+    │  └──── MINOR: 구조 개선 (3.4.0)
+    └─────── MAJOR: 근본 구조 변경
 ```
 
 ### 버전별 변경 이력
 
 | Version | Date | Type | 주요 변경 사항 |
 |---------|------|------|----------------|
-| **3.3.0** | 2026-02-09 | 🟢 MINOR | 폴더 구조 개선 + 경로 중앙화 + 모듈 정리 |
+| **3.4.0** | 2026-02-17 | 🟢 MINOR | RF 모델 + 앙상블 학습 |
+| **3.3.0** | 2026-02-09 | 🟢 MINOR | 폴더 구조 개선 + 경로 중앙화 |
 | **3.2.1** | 2026-02-09 | 🔵 PATCH | Multi-Horizon 버그 + Chunk 오염 방지 |
 | **3.2.0** | 2026-02-07 | 🟢 MINOR | 04단계(미래예측) + 05단계(유니버스) |
-| **3.1.1** | 2026-01-21 | 🔵 PATCH | Target 생성 위치 재변경 (03→02) |
-| **3.1.0** | 2026-01-21 | 🟢 MINOR | Multi-horizon 예측, Target-Centric |
-| 3.0.0 | 2026-01-18 | 🔴 MAJOR | Target 위치 변경, Feature Shift |
-| 2.0.0 | 2024-12-28 | 🔴 MAJOR | Feature prefix 통일 |
-| 1.0.0 | 2024-12-01 | - | Initial release |
+| 3.1.1 | 2026-01-21 | 🔵 PATCH | Target 생성 위치 재변경 |
+| 3.1.0 | 2026-01-21 | 🟢 MINOR | Multi-horizon 예측 |
+| 3.0.0 | 2026-01-18 | 🔴 MAJOR | Target 위치 변경 |
 
 ---
 
-## 📌 14. 마이그레이션 가이드
-
-### v3.2.x → v3.3.0 (폴더 구조 변경)
-
-**필수 작업**:
-
-1. **폴더 이동**:
-   ```bash
-   mkdir -p data/03_training data/04_forecasts data/05_universe
-   
-   # 기존 03_results 내용 이동
-   mv data/03_results/{date}/predictions.parquet data/03_training/{date}/
-   mv data/03_results/{date}/*.pkl data/03_training/{date}/
-   mv data/03_results/{date}/forecasts/* data/04_forecasts/{date}/
-   mv data/03_results/{date}/universe/* data/05_universe/{date}/
-   ```
-
-2. **노트북 코드 수정** (모든 노트북):
-   ```python
-   # Before
-   from pathlib import Path
-   ref_date = cfg['project']['reference_date']
-   result_dir = Path("data/03_results") / ref_date
-   pred_path = result_dir / "predictions.parquet"
-   
-   # After
-   from src.utils.config import ProjectPaths
-   paths = ProjectPaths.from_config(cfg)
-   pred_path = paths.get_predictions_parquet()
-   ```
-
-3. **경로 참조 모두 교체** (단순 교체 작업):
-   - `"data/03_results"` → `ProjectPaths` 메서드 사용
-   - 약 30줄의 경로 조립 코드 → 1줄
-
-**호환성**:
-- ✅ 데이터/모델 포맷 변경 없음 (.pkl, .parquet 유효)
-- ⚠️ 폴더 구조 변경 (마이그레이션 필수)
-
----
-
-## ✔️ 주요 변경 사항 요약 (v3.3.0 + v3.2.1)
-
-### 🟢 MINOR Changes (v3.3.0)
-
-#### 1. H1 - 폴더 구조 개선
-- `data/03_results/` → `data/03_training/`, `data/04_forecasts/`, `data/05_universe/`
-- 단계별 독립적 폴더 → 명확한 계층 구조
-
-#### 2. H2 - 경로 중앙화
-- `ProjectPaths` 클래스 도입
-- 모든 노트북에서 일관된 경로 관리
-- 하드코딩된 경로 제거
-
-#### 3. H3 - 모듈 정리
-- `src/universe/select_universe.py` Facade Pattern 적용
-- Step 5 노트북 200줄 로직 → 함수 1줄로 캡슐화
-- 복잡한 비즈니스 로직 투명화
-
-### 🔵 PATCH Changes (v3.2.1)
-
-#### 1. Multi-Horizon Walk-Forward 버그 수정
-- **문제**: 각 Horizon별로 shift + dropna 후 길이 불일치
-- **해결**: 모든 Horizon의 교집합 인덱스만 사용
-- **영향**: 정확도 평가 및 예측 결과 신뢰성 향상
-
-#### 2. Recursive Extension 데이터 오염 방지
-- **문제**: Chunk 1+ 예측 시 실제 과거 volume 참조로 오염
-- **해결**: 최근 20일 평균 volume 사용
-- **영향**: Chunk 진행에 따른 오차 누적 개선
-
----
-
-## 📚 참고 문서
-
-- **변경 이력**: `docs/changelog_schema.md` (업데이트 완료)
-- **모델 구조**: `src/models/lightgbm_model.py`
-- **트레이너**: `src/modeling/trainer.py` (v3.2.1 버그 수정)
-- **유니버스 선정**: `src/universe/select_universe.py` (v3.3.0 Facade)
-- **위험 평가**: `src/utils/risk.py`
-- **하드 필터**: `src/universe/filters.py`
-
----
-
-**Last Updated**: 2026-02-09  
-**Schema Version**: 3.3.0  
+**Last Updated**: 2026-02-17  
+**Schema Version**: 3.4.0  
 **Status**: ✅ Stable  
 **Maintained by**: SignalWeaver Team
