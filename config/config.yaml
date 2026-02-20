@@ -1,12 +1,12 @@
 # SignalWeaver 프로젝트 공통 설정
 project:
   name: "SignalWeaver"
-  reference_date: "20260213"
+  reference_date: "20260219"
 
 # 01_collect_data 관련 설정
 data_collection:
-  start_date: "20221114"
-  end_date: "20260213"
+  start_date: "20230511"
+  end_date: "20260219"
   save_csv: True
   save_parquet: True
   min_sleep: 0.05
@@ -21,19 +21,31 @@ preprocessing:
   save_csv: True
   save_parquet: True
 
-# 03_train_predict 관련 설정 (Multi-Horizon Update)
+# 03_train_predict 관련 설정 (v3.5.0: 2-Fold + log_return 타겟)
 training:
-  train_end: "2025-02-14"
-  
-  # Multi-horizon 설정
+  # 검증 폴드 훈련 종료일
+  # 테스트 폴드 훈련 종료일 = train_end + valid_window_days 거래일
+  train_end: "2025-08-12"
+
+  # 검증 윈도우 크기 (거래일)
+  # 동시에 테스트 폴드의 훈련 구간 롤링 offset으로 사용됨
   valid_window_days: 60
+
+  # 테스트 윈도우 크기 (거래일)
+  # 엄밀히 valid_window_days와 다를 수 있으나 보통 동일하게 설정
   test_window_days: 60
-  num_valid: 3       # Walk-forward 검증 횟수
+
+  # 02단계에서 생성된 기준 타겟 컬럼 (log_close 값을 담고 있어야 함)
   target_col_name: "target_log_close"
-  
+
+  # 타겟 타입
+  # "log_return": target_log_return_h{n} = log_close(t+n) - log_close(t)  [권장]
+  # "log_close" : target_log_close_h{n}  = log_close(t+n)                [레거시]
+  target_type: "log_return"
+
   # 예측하고자 하는 시차(영업일) 리스트
   horizons: [1, 2, 3, 4, 5]
-  
+
   # LightGBM용 파라미터
   lgbm_params:
     objective: "regression"
@@ -45,9 +57,9 @@ training:
     bagging_fraction: 0.8
     bagging_freq: 5
     random_state: 42
-    n_jobs: -1       # 병렬 처리
-    verbose: -1      # 로그 끄기
-  
+    n_jobs: -1
+    verbose: -1
+
   # RandomForest 전용 파라미터
   randomforest_params:
     n_estimators: 40
@@ -60,33 +72,23 @@ training:
 
 # 05_universe_selection 관련설정
 universe:
-  model_date: "20260213"
+  model_date: "20260219"
 
 # 모델 선택: 'lightgbm', 'randomforest' or 'ensemble'
-active_model: "ensemble"
+active_model: "lightgbm"
 
-# 📂 경로 설정 (H1 패치: 단계별 분리)
+# 📂 경로 설정
 paths:
-  # 기본 경로
   raw_dir: "data/01_raw"
   processed_dir: "data/02_processed"
-  
-  # ✨ H1 패치: 단계별 독립 경로
-  training_dir: "data/03_training"      # Step 3: 학습 검증 예측
-  forecasts_dir: "data/04_forecasts"    # Step 4: 미래 예측
-  universe_dir: "data/05_universe"      # Step 5: 최종 선정
-  
-  # 모델 저장 (Step 3과 연관)
-  model_dir: "data/03_training"         # 학습 단계와 동일 위치
-  
-  # 메타 데이터
+  training_dir: "data/03_training"
+  forecasts_dir: "data/04_forecasts"
+  universe_dir: "data/05_universe"
+  model_dir: "data/03_training"
   meta_dir: "data/99_meta"
 
 # 캘린더 설정
 calendar:
-  # 시작일과 종료일을 구체적으로 지정 (save_trading_days의 방식 반영)
-  start_date: "2026-02-19"
-  end_date: "2026-05-18"
-  
-  # pandas_market_calendars 사용 여부 설정
+  start_date: "2026-02-20"
+  end_date: "2026-05-19"
   prefer_mcal: True
