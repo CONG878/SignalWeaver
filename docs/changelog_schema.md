@@ -1,9 +1,218 @@
-# Schema Changelog (Updated v3.4.0)
+﻿# Schema Changelog (Updated v3.5.0)
 
 All notable changes to the data schema will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [3.5.0] - 2026-02-20
+
+### 🟢 MINOR Changes - Training Pipeline Improvement
+
+변경 범위: **03단계 (Training), 04단계 (Forecasts)**
+02단계 및 05단계 스키마 변경 없음.
+
+---
+
+#### 1. 검증/테스트 분리 — 2-Fold Walk-Forward 구조
+
+**배경:**
+기존 `num_valid=3` 구조에서 검증 폴드(Fold 0~1)의 예측값이 버려지고, 앙상블 가중치 최적화가 테스트셋(Fold 2)으로 수행되어 데이터 누수가 발생하고 있었습니다.
+
+**변경 사항:**
+
+`num_valid` 파라미터 제거 → 2-Fold 고정 구조 채택
+
+```
+Before (v3.4.0, num_valid=3):
+  Fold 0 (Valid-1): train [0,E],   eval [E, E+V]   → 예측값 버림
+  Fold 1 (Valid-2): train [V,E+V], eval [E+V,E+2V] → 예측값 버림
+  Fold 2 (TEST)   : train [2V,E+2V], eval [E+2V,E+3V]
+                    → predictions.parquet (단일 파일)
+                    → 앙상블 가중치 최적화 입력 (테스트셋 누수)
+
+After (v3.5.0):
+  [검증 폴드]: train [0, E],   valid [E, E+V]
+               → val_predictions.parquet (앙상블 가중치용)
+               → Early stopping 기준
+  [테스트 폴드]: train [V, E+V], test [E+V, E+V+T]
+                → test_predictions.parquet (최종 평가 전용)
+                → final_model
+```
+
+**파일 구조 변경:**
+
+```
+# Before (v3.4.0)
+data/03_training/{date}/{model_name}/
+  └── predictions.parquet          # 단일 예측 파일
+
+# After (v3.5.0)
+data/03_training/{date}/{model_name}/
+  ├── val_predictions.parquet      # ✨ 검증 폴드 (앙상블 가중치 최적화 입력)
+  └── test_predictions.parquet     # ✨ 테스트 폴드 (최종 평가 전용)
+```
+
+**예측 파일 컬럼 구성 (log_return 모드):**
+
+```python
+# val_predictions.parquet / test_predictions.parquet 공통
+columns = [
+    'date', 'ticker', 'fold',                    # 메타 (fold='valid'|'test')
+
+    # 모델 원시 예측 (log_return)
+    'pred_target_log_return_h1',
+    'pred_target_log_return_h2',
+    'pred_target_log_return_h3',
+    'pred_target_log_return_h4',
+    'pred_target_log_return_h5',
+
+    # 정답값
+    'true_target_log_return_h1',
+    # ... h2~h5 동일
+
+    # 역산값 (target_log_close 조인 후 생성)
+    'pred_log_close_target_log_return_h1',
+    'pred_close_target_log_return_h1',
+    # ... h2~h5 동일
+]
+```
+
+**03b_train_ensemble.ipynb 변경:**
+
+```python
+# Before (v3.4.0): 테스트셋으로 가중치 최적화 (데이터 누수)
+df_lgbm = pd.read_parquet(".../predictions.parquet")
+weights = minimize(rmse, ...)  # 테스트셋 기반
+
+# After (v3.5.0): 검증셋으로 가중치 최적화 → 테스트셋은 순수 평가
+df_lgbm_val = pd.read_parquet(".../val_predictions.parquet")
+weights = minimize(rmse, ...)  # 검증셋 기반
+
+df_lgbm_test = pd.read_parquet(".../test_predictions.parquet")
+# 테스트셋 성능 확인 (가중치 변경 없음)
+```
+
+**설정 변경 (config.yaml):**
+
+```yaml
+# Before (v3.4.0)
+training:
+  num_valid: 3           # ← 제거
+
+# After (v3.5.0)
+training:
+  valid_window_days: 60  # 검증 윈도우 (거래일)
+  test_window_days: 60   # 테스트 윈도우 (거래일)
+  # num_valid 제거됨
+```
+
+**수정된 파일:**
+- 🔧 `src/modeling/trainer.py` — 2-Fold 고정 구조, `val_predictions` 저장 추가, 폴드 기간 출력
+- 🔧 `03_train_predict.ipynb` — 저장 셀: `val_predictions.parquet` + `test_predictions.parquet` 분리
+- 🔧 `03b_train_ensemble.ipynb` — 가중치 최적화 입력 교체, 테스트셋 평가 셀 신규 추가
+- 🔧 `config/config.yaml` — `num_valid` 제거
+
+---
+
+#### 2. log_return 타겟 전환
+
+**배경:**
+기존 `target_log_close`는 비정상(non-stationary) 시계열로, 모델이 절대 가격 수준을 기억해야 하는 trivial solution으로 수렴할 위험이 있었습니다. log_return은 0 근방에서 안정적인 정상 시계열이므로 패턴 학습에 유리합니다.
+
+**수학적 정의:**
+
+```
+target_log_return_h{n}(t) = log(close(t+n)) - log(close(t))
+                           = target_log_close(t+n) - target_log_close(t)
+                           = 누적 로그 수익률
+
+역산:
+  pred_log_close(t+n) = target_log_close(t) + pred_log_return_h{n}
+  pred_close(t+n)     = exp(pred_log_close(t+n))
+```
+
+**타겟 컬럼명 변경:**
+
+```
+Before (v3.4.0): target_log_close_h{n}    (비정상 시계열)
+After  (v3.5.0): target_log_return_h{n}   (정상 시계열)
+```
+
+**02단계 변경 없음:**
+`target_log_close` 컬럼은 02단계에 그대로 유지됩니다. Trainer가 이 컬럼을 기준값으로 읽어 horizon별 log_return을 동적으로 계산합니다.
+
+**03단계 Trainer 변경:**
+
+```python
+# Before (v3.4.0): log_close 방식
+col_name = f"target_log_close_h{h}"
+df_run[col_name] = df_run.groupby('ticker')['target_log_close'].shift(-h)
+
+# After (v3.5.0): log_return 방식
+col_name = f"target_log_return_h{h}"
+future_log_close  = df_run.groupby('ticker')['target_log_close'].shift(-h)
+df_run[col_name]  = future_log_close - df_run['target_log_close']
+```
+
+**04단계 Recursive Extension 변경:**
+
+```python
+# Before (v3.4.0)
+pred_log_close = model.predict(X, target_name=target_name).iloc[0]
+pred_close     = exp(pred_log_close)
+
+# After (v3.5.0)
+log_close_base  = log(latest_row['close'])          # chunk 직전 close
+pred_log_return = model.predict(X, target_name=...) # 모델 원시 출력
+pred_log_close  = log_close_base + pred_log_return  # 역산
+pred_close      = exp(pred_log_close)
+
+# ⚠️ target_name 순회: model.target_columns 대신 sorted(model.models.keys()) 사용
+```
+
+**future_forecasts.parquet 컬럼 추가:**
+
+```python
+# v3.5.0 신규 컬럼 (log_return 모드에서만 생성)
+'pred_log_return'   # 모델 원시 출력값 보존
+
+# 기존 컬럼 유지 (하위 호환)
+'pred_log_close'    # 역산된 로그 종가
+'pred_close'        # 역산된 종가 (원화)
+```
+
+**설정 추가 (config.yaml):**
+
+```yaml
+training:
+  target_col_name: "target_log_close"  # 02단계 기준값 컬럼 (변경 없음)
+  target_type: "log_return"            # ✨ 신규: "log_return" | "log_close"
+```
+
+**수정된 파일:**
+- 🔧 `src/modeling/trainer.py` — `target_type` 파라미터 추가, `_build_target_cols()` 분기
+- 🔧 `03_train_predict.ipynb` — Trainer 초기화에 `target_type` 전달, 저장 셀 역산 로직
+- 🔧 `03b_train_ensemble.ipynb` — `pred_cols` 필터링: `pred_target_log_return_h` prefix 기준
+- 🔧 `04_forecast_future.ipynb` — Recursive Extension 역산 로직, `sorted(model.models.keys())` 순회
+- 🔧 `config/config.yaml` — `target_type: "log_return"` 추가
+
+---
+
+### 호환성
+
+**비호환 (재실행 필요):**
+- 03단계 모델(.pkl): `models.keys()`가 `target_log_close_h{n}` → v3.5.0 코드에서 ValueError
+- 03단계 예측 파일: `predictions.parquet` → `val_predictions.parquet` + `test_predictions.parquet`
+- 03b: 가중치 최적화 입력 파일명 변경
+
+**호환 (재실행 불필요):**
+- 01단계 Raw 데이터
+- 02단계 Feature 데이터셋 (`target_log_close` 컬럼 유지)
+- 04단계 출력 컬럼명 (`pred_log_close`, `pred_close` 유지)
+- 05단계 입력 스키마
 
 ---
 
@@ -16,100 +225,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **변경 사항**:
 - RandomForest 멀티아웃풋 모델 추가
 - 앙상블 학습 단계(03b_train_ensemble.ipynb) 도입
-- 모델별 폴더 계층 추가 (03_training/{date}/{model_name}/)
-- 설정 옵션: active_model 추가
+- 모델별 폴더 계층 추가: `03_training/{date}/{model_name}/`
+- config: `active_model` 옵션 추가
 
 **신규 추가 파일**:
-```
-✅ src/models/randomforest_model.py
-   - RandomForestMultiModel 클래스
-   - Scikit-learn MultiOutputRegressor 래퍼
-
-✅ src/models/ensemble_model.py
-   - EnsembleModel 클래스
-   - 여러 모델의 가중치 블렌딩
-
-✅ 03b_train_ensemble.ipynb
-   - OOF 데이터 기반 최적 가중치 탐색
-   - Scipy.optimize.minimize 사용
-```
+- `src/models/randomforest_model.py` — RandomForestMultiModel
+- `src/models/ensemble_model.py` — EnsembleModel
+- `03b_train_ensemble.ipynb` — OOF 기반 최적 가중치 탐색
 
 **폴더 구조 변경**:
 
-Before (v3.3.0):
 ```
+# Before (v3.3.0)
 data/03_training/{YYYYMMDD}/
-├── *.pkl
-├── registry.json
-└── predictions.parquet
-```
+  ├── *.pkl
+  ├── registry.json
+  └── predictions.parquet
 
-After (v3.4.0):
-```
+# After (v3.4.0)
 data/03_training/{YYYYMMDD}/
-├── lightgbm/
-│   ├── *.pkl
-│   ├── registry.json
-│   └── predictions.parquet
-├── randomforest/
-│   ├── *.pkl
-│   ├── registry.json
-│   └── predictions.parquet
-└── ensemble/
-    ├── *.pkl
-    ├── registry.json
-    └── predictions.parquet
+  ├── lightgbm/   { *.pkl, registry.json, predictions.parquet }
+  ├── randomforest/ { ... }
+  └── ensemble/   { ... }
 ```
 
 **설정 변경** (config.yaml):
-
 ```yaml
-# NEW: RandomForest 파라미터
-randomforest_params:
-  n_estimators: 40
-  max_depth: 8
-  min_samples_split: 10
-  min_samples_leaf: 5
-  n_jobs: -1
-  random_state: 42
-  max_samples: 0.6
-
-# NEW: 모델 선택 옵션
-active_model: "ensemble"  # 'lightgbm' | 'randomforest' | 'ensemble'
+randomforest_params: { n_estimators: 40, max_depth: 8, ... }
+active_model: "ensemble"   # 'lightgbm' | 'randomforest' | 'ensemble'
 ```
 
-**수정된 파일**:
-- 🔧 `src/models/base.py` - ModelBase 호환성 확장 (3개 모델)
-- 🔧 `src/models/artifact.py` - 모델별 폴더 지원
-- 🔧 `src/utils/config.py` - ProjectPaths 메서드 추가
-- 🔧 `03_train_predict.ipynb` - 모델 선택 로직 추가
-- 🔧 `04_forecast_future.ipynb` - 모델 로딩 확장
-- 🔧 `config/config.yaml` - 설정 옵션 추가
-
-**이점**:
-- ✅ 여러 모델 알고리즘 비교 가능
-- ✅ 앙상블로 예측 정확도 향상
-- ✅ 모델별 성능 추적 가능
-- ✅ 유연한 모델 선택 (config에서 한 줄)
-
-**노트북 실행 순서** (Updated):
-1. 01_collect_data.ipynb
-2. 02_build_dataset.ipynb
-3. 03_train_predict.ipynb
-   - active_model = "lightgbm" → 실행
-   - active_model = "randomforest" → 재실행 (양쪽 모두 필요)
-4. **03b_train_ensemble.ipynb** (NEW - 선택사항)
-   - 앙상블 사용 시에만 실행
-5. 04_forecast_future.ipynb
-6. 05_universe_selection.ipynb
-
-**마이그레이션**:
-- 기존 LightGBM 모델: 자동 호환 (폴더 구조만 자동 생성)
-- 새로운 모델 추가: config.yaml에서 active_model 변경 후 03_train_predict 재실행
+**수정된 파일**: `src/models/base.py`, `src/models/artifact.py`, `src/utils/config.py`,
+`03_train_predict.ipynb`, `04_forecast_future.ipynb`, `config/config.yaml`
 
 **호환성**:
-- ✅ 후방 호환 (backward compatible): v3.3.0 모델 그대로 사용 가능
-- ❌ 전방 호환 불가: v3.4.0 모델은 v3.3.0 코드에서 로드 불가
+- ✅ v3.3.0 LightGBM 모델 자동 호환
+- ❌ v3.4.0 모델은 v3.3.0 코드에서 로드 불가
 
 ---
 
@@ -117,189 +268,44 @@ active_model: "ensemble"  # 'lightgbm' | 'randomforest' | 'ensemble'
 
 ### 🟢 MINOR Changes - Infrastructure Modernization
 
-#### 1. H1 - 데이터 폴더 구조 개선
+#### H1 - 데이터 폴더 구조 개선
 
-**변경 사항**:
-- `data/03_results/` 구조 분해 → 단계별 독립 폴더
-- 새로운 폴더 구조로 계층 명확화
-
-**Before (v3.2.x)**:
 ```
+# Before (v3.2.x)
 data/03_results/{YYYYMMDD}/
-├── predictions.parquet        ← Step 3
-├── *.pkl
-├── forecasts/
-│   └── future_forecasts.parquet ← Step 4
-└── universe/
-    └── investment_report.xlsx  ← Step 5
-```
+  ├── predictions.parquet
+  ├── *.pkl
+  ├── forecasts/future_forecasts.parquet
+  └── universe/investment_report.xlsx
 
-**After (v3.3.0)**:
-```
+# After (v3.3.0)
 data/
-├── 03_training/{YYYYMMDD}/      ← 학습 검증 예측
-│   ├── *.pkl
-│   ├── registry.json
-│   ├── predictions.parquet
-│   └── csv/
-│
-├── 04_forecasts/{YYYYMMDD}/     ← 미래 예측
-│   ├── future_forecasts.parquet
-│   └── csv/
-│
-└── 05_universe/{YYYYMMDD}/      ← 최종 선정
-    ├── universe_full.parquet
-    ├── universe_candidates.parquet
-    ├── investment_report.csv
-    ├── investment_report.xlsx
-    └── filter_statistics.json
+  ├── 03_training/{YYYYMMDD}/
+  ├── 04_forecasts/{YYYYMMDD}/
+  └── 05_universe/{YYYYMMDD}/
 ```
 
-**이점**:
-- ✅ Step별로 폴더 계층이 일관성 있음
-- ✅ 각 단계의 산출물이 명확히 분리됨
-- ✅ 파이프라인의 선형 구조 반영
+#### H2 - ProjectPaths 클래스 도입
 
-**마이그레이션**:
-- 기존 파일은 그대로 유효 (포맷 변경 없음)
-- 폴더 이동만 필요
+`src/utils/config.py`에 `ProjectPaths` 클래스 추가. 모든 노트북의 경로 관리 통일.
 
-#### 2. H2 - ProjectPaths 클래스 도입 (경로 중앙화)
+#### H3 - select_universe.py 모듈 정리
 
-**변경 사항**:
-- `src/utils/config.py`에 `ProjectPaths` 클래스 추가
-- 모든 노트북의 경로 관리 통일
-
-**Before (v3.2.x)**:
-```python
-# 모든 노트북에서 반복되는 코드
-from pathlib import Path
-ref_date = cfg['project']['reference_date']
-raw_dir = Path(cfg['paths']['raw_dir']) / ref_date
-processed_dir = Path(cfg['paths']['processed_dir']) / ref_date
-result_dir = Path("data/03_results") / ref_date  # 하드코딩!
-
-raw_parquet = raw_dir / f"krx_prices_{ref_date}.parquet"
-dataset = processed_dir / "dataset.parquet"
-predictions = result_dir / "predictions.parquet"
-```
-
-**After (v3.3.0)**:
-```python
-# 통일된 인터페이스
-from src.utils.config import load_config, ProjectPaths
-
-cfg = load_config()
-paths = ProjectPaths.from_config(cfg)
-
-raw_parquet = paths.get_raw_parquet()
-dataset = paths.get_dataset_parquet()
-predictions = paths.get_predictions_parquet()  # 03_training 자동 매핑
-forecasts = paths.get_forecasts_parquet()      # 04_forecasts 자동 매핑
-universe = paths.get_universe_candidates()     # 05_universe 자동 매핑
-```
-
-**제공 메서드**:
-- `get_raw_parquet()`: 01단계
-- `get_dataset_parquet()`: 02단계
-- `get_predictions_parquet()`: 03단계 (training)
-- `get_forecasts_parquet()`: 04단계 (forecasts)
-- `get_universe_candidates()`: 05단계 (universe)
-- `ensure_dirs()`: 모든 출력 폴더 자동 생성
-
-**이점**:
-- ✅ 폴더 구조 변경 시 `config.py`만 수정
-- ✅ 모든 노트북에서 일관된 경로 사용
-- ✅ 타입 안전성 (IDE 자동완성)
-- ✅ ~30줄의 경로 조립 코드 → 2줄로 단축
-
-**영향받는 파일**:
-- `01_collect_data.ipynb`: ProjectPaths 사용
-- `02_build_dataset.ipynb`: ProjectPaths 사용
-- `03_train_predict.ipynb`: ProjectPaths 사용
-- `04_forecast_future.ipynb`: ProjectPaths 사용
-- `05_universe_selection.ipynb`: ProjectPaths 사용
-
-#### 3. H3 - 모듈 정리 (Facade Pattern)
-
-**변경 사항**:
-- `src/universe/select_universe.py`에 Facade Pattern 적용
-- Step 5 노트북의 복잡한 로직 캡슐화
-
-**Before (v3.2.x)**:
-```python
-# 05_universe_selection.ipynb에서 200줄의 직접 로직
-for ticker in tickers:
-    accuracy = calculate_accuracy(...)
-    profitability = calculate_profitability(...)
-    risk = calculate_risk(...)
-    # ... 복잡한 필터링 로직
-```
-
-**After (v3.3.0)**:
-```python
-# 캡슐화된 인터페이스
-from src.universe.select_universe import select_universe_candidates
-
-candidates = select_universe_candidates(
-    predictions_df=predictions,
-    forecasts_df=forecasts,
-    config=cfg
-)
-```
-
-**이점**:
-- ✅ 복잡한 비즈니스 로직 투명화
-- ✅ 노트북 가독성 향상
-- ✅ 로직 재사용성 증대
+Facade Pattern 적용, 단일 진입점 함수화.
 
 ---
 
 ## [3.2.1] - 2026-02-09
 
-### 🔵 PATCH Changes - Bug Fixes
+### 🔵 PATCH Changes
 
 #### 1. Multi-Horizon Walk-Forward 버그 수정
 
-**문제**:
-- 각 Horizon별로 shift + dropna 후 길이가 불일치
-- 예: h1에서 100개, h2에서 99개 → 예측 오차 누적
-
-**해결**:
-```python
-# Before (v3.2.0)
-for h in horizons:
-    df_h = df.loc[:, [f'feature_*', f'target_*_h{h}']].dropna()
-    # → df_h의 길이가 h마다 다름
-
-# After (v3.2.1)
-# 모든 Horizon의 교집합 인덱스만 사용
-valid_idx = df.dropna().index
-df_train = df.loc[valid_idx]
-```
-
-**영향**:
-- ✅ 정확도 평가 신뢰성 향상
-- ✅ 예측 결과 일관성 보장
+Horizon별 dropna 후 길이 불일치 → 모든 Horizon의 교집합 인덱스 사용.
 
 #### 2. Recursive Extension Chunk 오염 방지
 
-**문제**:
-- Chunk 1+ 예측 시 실제 과거 volume 참조
-- 재귀 진행에 따른 오차 누적
-
-**해결**:
-```python
-# Before (v3.2.0)
-forecast_features[:, 'volume_col'] = actual_volume  # ❌ 실제값 사용
-
-# After (v3.2.1)
-forecast_features[:, 'volume_col'] = volume_ma_20   # ✅ 평균값 사용
-```
-
-**영향**:
-- ✅ Chunk 진행에 따른 오차 감소
-- ✅ 장기 예측(t+30~t+60) 신뢰성 향상
+Chunk 1+ 예측 시 실제 volume 참조 → 최근 20일 평균으로 대체.
 
 ---
 
@@ -307,50 +313,8 @@ forecast_features[:, 'volume_col'] = volume_ma_20   # ✅ 평균값 사용
 
 ### 🟢 MINOR Changes - Multi-Stage Pipeline
 
-#### 1. Step 4 추가 (Recursive Extension)
-
-**변경 사항**:
-- 04_forecast_future.ipynb 추가
-- 미래(t+1 ~ t+60) 주가 예측
-
-**프로세스**:
-```
-Chunk 0: t-5~t-1 Feature → t+0~t+4 예측
-Chunk 1: Chunk0 + Feature → t+5~t+9 예측
-...
-Chunk 12: Chunk11 + Feature → t+55~t+59 예측
-```
-
-**데이터 구조**:
-```
-04_forecasts/{date}/future_forecasts.parquet
-└─ (n_tickers × 60_days, 5 columns)
-   - date, ticker, forecast_date, pred_target_log_close, ...
-```
-
-#### 2. Step 5 추가 (Universe Selection)
-
-**변경 사항**:
-- 05_universe_selection.ipynb 추가
-- 3대 평가 지표 기반 투자 후보 선정
-
-**평가 지표**:
-- **정확도**: 과거 예측 오차 (RMSE, MAE)
-- **수익성**: 예측값 기반 수익률
-- **위험**: 예측값 변동성
-
-**필터링**:
-- Hard Filter (강제 제외): 유동성 부족, 거래 중단 등
-- Score-based Ranking: 종합 점수로 순위 결정
-
-**데이터 구조**:
-```
-05_universe/{date}/
-├── universe_full.parquet          # 전체 평가 결과
-├── universe_candidates.parquet    # Top-K 후보
-├── investment_report.csv          # 상세 리포트
-└── filter_statistics.json         # 필터링 통계
-```
+- 04단계 추가: Recursive Extension 미래 예측
+- 05단계 추가: 3대 평가 지표 기반 유니버스 선정
 
 ---
 
@@ -358,14 +322,7 @@ Chunk 12: Chunk11 + Feature → t+55~t+59 예측
 
 ### 🔵 PATCH Changes
 
-#### Target 생성 위치 재변경 (03 → 02)
-
-**Before (v3.1.0)**:
-- Target을 03_train_predict.ipynb에서 생성
-
-**After (v3.1.1)**:
-- Target을 02_build_dataset.ipynb에서 생성
-- 이유: 모든 모델이 동일한 Target을 공유 (Feature와 Target의 일관성)
+Target 생성 위치 재변경: 03단계 → 02단계 (모든 모델이 동일 Target 공유)
 
 ---
 
@@ -373,20 +330,7 @@ Chunk 12: Chunk11 + Feature → t+55~t+59 예측
 
 ### 🟢 MINOR Changes
 
-#### Multi-Horizon Direct Forecasting
-
-**변경**:
-- 단일 예측(h=1)에서 다중 예측(h1~h5)으로 확장
-- Target-Centric Alignment: $X_{t-h} \rightarrow y_t$
-
-**데이터 정렬**:
-```python
-# Feature를 h일 과거로 Shift
-X_h = X.shift(h)          # t-h 기준
-y = y_original            # t 기준
-
-# 결과: X_h와 y의 index가 일치 → 직관적
-```
+Multi-Horizon Direct Forecasting (h1~h5) 도입. Target-Centric Alignment.
 
 ---
 
@@ -394,14 +338,7 @@ y = y_original            # t 기준
 
 ### 🔴 MAJOR Changes
 
-#### Target 위치 변경
-
-**Before (v2.x)**:
-- Target을 01_raw에서 정의
-
-**After (v3.0.0)**:
-- Target을 02_processed에서 생성
-- 이유: Feature와의 시간 정렬 명확화
+Target 생성 위치 변경: 01_raw → 02_processed. Feature와의 시간 정렬 명확화.
 
 ---
 
@@ -409,24 +346,15 @@ y = y_original            # t 기준
 
 ### 🔴 MAJOR Changes
 
-#### Feature Prefix 통일
-
-**변경**:
-- 모든 Feature에 `feature_` prefix 추가
-- 예: `ma_5` → `feature_ma_5`
+Feature Prefix 통일: `ma_5` → `feature_ma_5`.
 
 ---
 
 ## [1.0.0] - 2024-12-01
 
-### Initial Release
-
-**초기 스키마**:
-- Step 1: 데이터 수집 (Raw OHLCV)
-- Step 2: Feature 엔지니어링
-- Step 3: 모델 학습 (LightGBM)
+Initial Release. Step 1~3 (수집 → Feature → LightGBM 학습).
 
 ---
 
-**Last Updated**: 2026-02-17  
+**Last Updated**: 2026-02-20
 **Maintained by**: SignalWeaver Team
