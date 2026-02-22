@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from src.models.base import ModelBase
 import copy
+import scipy.stats as stats
 
 
 class WalkForwardTrainer:
@@ -270,27 +271,60 @@ class WalkForwardTrainer:
     # ──────────────────────────────────────────────────────────────
 
     def _evaluate(self, eval_df: pd.DataFrame, target_cols: List[str]) -> Dict[str, float]:
-        """Horizon별 RMSE 및 평균 RMSE 계산"""
+        """Horizon별 RMSE, IC, ICIR 및 평균 지표 계산"""
         if eval_df.empty:
-            return {'avg_rmse': np.nan, 'per_horizon': {}, 'samples': 0}
+            return {'avg_rmse': np.nan, 'avg_ic': np.nan, 'per_horizon': {}, 'samples': 0}
 
         preds_df = self.model.predict(eval_df[self.feature_cols])
         if isinstance(preds_df, np.ndarray):
             preds_df = pd.DataFrame(preds_df, index=eval_df.index, columns=target_cols)
 
+        # 예측값을 임시로 원본 df에 결합 (날짜별 그룹화를 위해)
+        temp_eval = eval_df[[self.date_col]].copy()
+        for col in target_cols:
+            temp_eval[f'pred_{col}'] = preds_df[col].values
+            temp_eval[f'true_{col}'] = eval_df[col].values
+
         per_horizon = {}
         for col in target_cols:
-            y_true = eval_df[col].values
-            y_pred = preds_df[col].values
+            # 1. RMSE 계산
+            y_true = temp_eval[f'true_{col}'].values
+            y_pred = temp_eval[f'pred_{col}'].values
             mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
             rmse = np.sqrt(np.mean((y_true[mask] - y_pred[mask]) ** 2)) if mask.any() else np.nan
-            per_horizon[col] = rmse
 
-        valid_rmses = [v for v in per_horizon.values() if not np.isnan(v)]
+            # 2. Daily Cross-Sectional IC 계산
+            daily_ics = []
+            for date, group in temp_eval.groupby(self.date_col):
+                if len(group) > 1:  # 상관계수 계산을 위해 최소 2개 종목 필요
+                    g_true = group[f'true_{col}'].values
+                    g_pred = group[f'pred_{col}'].values
+                    g_mask = ~np.isnan(g_true) & ~np.isnan(g_pred)
+                    if g_mask.sum() > 1:
+                        corr, _ = stats.spearmanr(g_true[g_mask], g_pred[g_mask])
+                        if not np.isnan(corr):
+                            daily_ics.append(corr)
+            
+            ic_mean = np.mean(daily_ics) if daily_ics else np.nan
+            ic_std = np.std(daily_ics) if daily_ics else np.nan
+            icir = (ic_mean / ic_std) if (ic_std and ic_std > 0) else np.nan
+
+            per_horizon[col] = {
+                'rmse': rmse,
+                'ic_mean': ic_mean,
+                'icir': icir
+            }
+
+        # 유효한 값들의 평균 계산
+        valid_rmses = [v['rmse'] for v in per_horizon.values() if not np.isnan(v['rmse'])]
+        valid_ics = [v['ic_mean'] for v in per_horizon.values() if not np.isnan(v['ic_mean'])]
+        
         avg_rmse = float(np.mean(valid_rmses)) if valid_rmses else np.nan
+        avg_ic = float(np.mean(valid_ics)) if valid_ics else np.nan
 
         return {
             'avg_rmse'    : avg_rmse,
+            'avg_ic'      : avg_ic,
             'per_horizon' : per_horizon,
             'samples'     : int(eval_df[target_cols].notna().all(axis=1).sum()),
         }

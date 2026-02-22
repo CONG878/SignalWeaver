@@ -33,6 +33,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Any, Optional
 from tqdm import tqdm
+from scipy.stats import spearmanr
 
 # 범용 계산 유틸리티 (utils에 유지)
 from src.utils.trading import find_best_trade_vectorized
@@ -116,9 +117,9 @@ def evaluate_model_accuracy(
     for ticker in iterator:
         ticker_data = df_eval[df_eval['ticker'] == ticker].copy()
         
-        # 모든 Horizon의 예측 결과 통합
         all_errors = []
-        direction_matches = []  # 방향성 일치 여부
+        all_trues = []
+        all_preds = []
         
         for h in range(1, 6):  # h1~h5
             pred_col = f'pred_target_log_close_h{h}'
@@ -128,37 +129,33 @@ def evaluate_model_accuracy(
                 valid_rows = ticker_data[[pred_col, true_col]].dropna()
                 
                 if len(valid_rows) > 0:
-                    # 오차 (RMSE용)
                     errors = valid_rows[pred_col] - valid_rows[true_col]
                     all_errors.extend(errors.values)
-                    
-                    # 방향성 일치 (전일 대비 상승/하락)
-                    pred_change = valid_rows[pred_col].diff()
-                    true_change = valid_rows[true_col].diff()
-                    direction_match = (pred_change * true_change) > 0
-                    direction_matches.extend(direction_match.dropna().values)
+                    all_trues.extend(valid_rows[true_col].values)
+                    all_preds.extend(valid_rows[pred_col].values)
         
-        if len(all_errors) > 10:  # 최소 10개 이상 예측값 필요
+        if len(all_errors) > 10:
             all_errors = np.array(all_errors)
             
             # RMSE & MAE
             rmse = np.sqrt(np.mean(all_errors ** 2))
             mae = np.mean(np.abs(all_errors))
             
-            # Directional Accuracy
-            if len(direction_matches) > 0:
-                directional_accuracy = np.mean(direction_matches)
+            # 시계열 IC (Time-Series Spearman Correlation)
+            if len(all_trues) > 1:
+                ic, _ = spearmanr(all_trues, all_preds)
+                if np.isnan(ic):
+                    ic = 0.0
             else:
-                directional_accuracy = 0.5  # 기본값 (랜덤 수준)
+                ic = 0.0
             
-            # RMSE 역수 기반 신뢰도
             confidence_rmse = 1 / (1 + rmse)
             
             accuracy_metrics.append({
                 'ticker': ticker,
                 'rmse': rmse,
                 'mae': mae,
-                'directional_accuracy': directional_accuracy,
+                'ic_mean': ic,  # directional_accuracy를 ic_mean으로 대체
                 'confidence_rmse': confidence_rmse,
                 'num_predictions': len(all_errors)
             })
@@ -168,14 +165,14 @@ def evaluate_model_accuracy(
     if len(df_accuracy) == 0:
         raise ValueError("❌ 평가 가능한 종목이 없습니다.")
     
-    # 순위 부여
-    df_accuracy['accuracy_rank'] = df_accuracy['rmse'].rank()
+    # 순위 부여 (IC가 높을수록 1위에 가깝게 역순 정렬)
+    df_accuracy['accuracy_rank'] = df_accuracy['ic_mean'].rank(ascending=False)
     
     if verbose:
         print(f"\n✅ 정확도 평가 완료")
         print(f"   - 평가 종목 수: {len(df_accuracy)}")
         print(f"   - 평균 RMSE: {df_accuracy['rmse'].mean():.4f}")
-        print(f"   - 평균 방향성 정확도: {df_accuracy['directional_accuracy'].mean():.2%}")
+        print(f"   - 평균 IC (Information Coefficient): {df_accuracy['ic_mean'].mean():.4f}")
     
     return df_accuracy
 

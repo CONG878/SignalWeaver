@@ -1,12 +1,12 @@
 # SignalWeaver 프로젝트 공통 설정
 project:
   name: "SignalWeaver"
-  reference_date: "20260219"
+  reference_date: "20260220"
 
 # 01_collect_data 관련 설정
 data_collection:
-  start_date: "20230511"
-  end_date: "20260219"
+  start_date: "20230512"
+  end_date: "20260220"
   save_csv: True
   save_parquet: True
   min_sleep: 0.05
@@ -25,7 +25,7 @@ preprocessing:
 training:
   # 검증 폴드 훈련 종료일
   # 테스트 폴드 훈련 종료일 = train_end + valid_window_days 거래일
-  train_end: "2025-08-12"
+  train_end: "2025-08-13"
 
   # 검증 윈도우 크기 (거래일)
   # 동시에 테스트 폴드의 훈련 구간 롤링 offset으로 사용됨
@@ -41,7 +41,7 @@ training:
   # 타겟 타입
   # "log_return": target_log_return_h{n} = log_close(t+n) - log_close(t)  [권장]
   # "log_close" : target_log_close_h{n}  = log_close(t+n)                [레거시]
-  target_type: "log_return"
+  target_type: "log_close"
 
   # 예측하고자 하는 시차(영업일) 리스트
   horizons: [1, 2, 3, 4, 5]
@@ -72,7 +72,7 @@ training:
 
 # 05_universe_selection 관련설정
 universe:
-  model_date: "20260219"
+  model_date: "20260220"
 
 # 모델 선택: 'lightgbm', 'randomforest' or 'ensemble'
 active_model: "lightgbm"
@@ -89,6 +89,6 @@ paths:
 
 # 캘린더 설정
 calendar:
-  start_date: "2026-02-20"
-  end_date: "2026-05-19"
+  start_date: "2026-02-23"
+  end_date: "2026-05-20"
   prefer_mcal: True
