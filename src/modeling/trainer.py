@@ -1,6 +1,12 @@
 # src/modeling/trainer.py
+# v3.7.0 변경사항:
+#   1. target_type="log_return" → DeprecationWarning 추가, 기본값 "log_close"로 롤백
+#   2. Embargo gap 도입 (run 메서드)
+#      → G = max(self.horizons) 자동 계산 (별도 파라미터 없음)
+#      → val/test 훈련 샘플 끝을 G만큼 앞당기고, eval 윈도우는 그대로 유지
 
 from __future__ import annotations
+import warnings
 from typing import Dict, Any, List, Optional
 import pandas as pd
 import numpy as np
@@ -16,7 +22,7 @@ class WalkForwardTrainer:
         model: ModelBase,
         feature_cols: List[str],
         target_col_name: str = "target_log_close",
-        target_type: str = "log_return",
+        target_type: str = "log_close",
         horizons: List[int] = [1],
         date_col: str = "date",
         categorical_features: Optional[List[str]] = None,
@@ -27,18 +33,28 @@ class WalkForwardTrainer:
         -------
         target_col_name : str
             02단계 dataset의 기준 타겟 컬럼명.
-            log_return 모드에서는 이 컬럼이 log_close 값을 담고 있어야 함.
             (기본값: "target_log_close")
         target_type : str
+            "log_close"  : target_log_close_h{n}(t) = log_close(t+n)          [기본값, 권장]
             "log_return" : target_log_return_h{n}(t) = log_close(t+n) - log_close(t)
-                           오늘 대비 n일 후의 누적 로그 수익률. 정상(stationary) 시계열.
-            "log_close"  : target_log_close_h{n}(t) = log_close(t+n)
-                           레거시 모드. 비정상 시계열이므로 권장하지 않음.
+                           ⚠️ DEPRECATED (v3.7.0): 피처 확장 후 log_close 대비 성능 열위.
+                           원인 분석 및 개선 완료 전까지 log_close를 사용하세요.
         """
         if target_type not in ("log_return", "log_close"):
             raise ValueError(
                 f"target_type은 'log_return' 또는 'log_close'이어야 합니다. "
                 f"받은 값: '{target_type}'"
+            )
+
+        # ⚠️ v3.7.0: log_return deprecated
+        if target_type == "log_return":
+            warnings.warn(
+                "[DEPRECATED v3.7.0] target_type='log_return'은 deprecated 상태입니다. "
+                "피처 확장 이후 log_close 대비 성능이 열위로 확인되어 롤백되었습니다. "
+                "원인 분석 및 개선 완료 전까지 target_type='log_close'를 사용하세요. "
+                "재도입 여부는 향후 버전에서 결정됩니다.",
+                DeprecationWarning,
+                stacklevel=2
             )
 
         self.model = model
@@ -62,22 +78,35 @@ class WalkForwardTrainer:
         """
         2-Fold Walk-Forward 학습 실행
 
-        구조:
-            [검증 폴드] 훈련: [0, E],    검증: [E, E+V]
-                        → early stopping 기준 + val_predictions 저장 (앙상블 가중치용)
-            [테스트 폴드] 훈련: [V, E+V], 테스트: [E+V, E+V+T]
-                        → 최종 성능 평가 + test_predictions 저장 + final_model
+        Embargo gap = max(self.horizons) 자동 계산.
+        horizons 변경 시 gap이 자동으로 연동되므로 별도 설정 불필요.
+
+        구조 (G = max(horizons)):
+            [검증 폴드]
+              실제 훈련: [0,     E-G]    ← embargo gap만큼 끝을 앞당김
+              embargo:   [E-G,   E]      ← 검증 타겟과 날짜 겹침 구간 제거
+              검증:      [E,     E+V]    ← 윈도우 크기 변화 없음
+
+            [테스트 폴드]
+              실제 훈련: [V,     E+V-G]  ← 동일 구조
+              embargo:   [E+V-G, E+V]
+              테스트:    [E+V,   E+V+T]  ← 윈도우 크기 변화 없음
+
+        E = train_end, V = valid_window_days, T = test_window_days, G = max(horizons)
+
+        ※ 훈련 샘플 손실(G일)은 01단계에서 수집 기간을 앞당겨 보완합니다.
 
         반환
         ----
         dict with keys:
-            'valid_metrics'     : 검증 폴드 지표 (avg_rmse, per_horizon, samples)
+            'valid_metrics'     : 검증 폴드 지표 (avg_rmse, avg_ic, per_horizon, samples)
             'val_predictions'   : 검증 폴드 예측값 DataFrame (앙상블 가중치 최적화용)
             'test_metrics'      : 테스트 폴드 지표
             'test_predictions'  : 테스트 폴드 예측값 DataFrame (최종 평가 전용)
             'final_model'       : 테스트 폴드 학습 모델
             'target_cols'       : 생성된 타겟 컬럼명 리스트 (04단계 역산에 필요)
             'target_type'       : 사용된 타겟 타입
+            'embargo_gap_days'  : 적용된 embargo gap (= max(horizons), 거래일)
         """
         fit_kwargs = fit_kwargs or {}
 
@@ -104,16 +133,24 @@ class WalkForwardTrainer:
         if train_end_idx < len(all_dates) and all_dates[train_end_idx] == train_end_val:
             train_end_idx += 1  # train_end 당일 포함
 
+        G = max(self.horizons)  # embargo gap = max horizon (자동 계산)
+
         # 검증 폴드
         val_train_start_idx = 0
-        val_train_end_idx   = train_end_idx
+        val_train_end_idx   = train_end_idx - G      # ← 실제 학습 샘플 끝 (embargo 적용)
+        val_eval_start_idx  = train_end_idx           # ← 검증 시작 (embargo gap 이후)
         val_eval_end_idx    = train_end_idx + valid_window_days
 
         # 테스트 폴드 (훈련 구간을 valid_window_days만큼 롤링)
         test_train_start_idx = valid_window_days
-        test_train_end_idx   = train_end_idx + valid_window_days
-        test_eval_end_idx    = test_train_end_idx + test_window_days
+        test_train_end_idx   = train_end_idx + valid_window_days - G  # ← embargo 적용
+        test_eval_start_idx  = train_end_idx + valid_window_days
+        test_eval_end_idx    = test_eval_start_idx + test_window_days
 
+        if val_train_end_idx <= val_train_start_idx:
+            raise ValueError(
+                f"embargo_gap_days={G}가 너무 커서 검증 폴드 훈련 데이터가 없습니다."
+            )
         if val_eval_end_idx > len(all_dates):
             raise ValueError(
                 f"검증 폴드 데이터 부족: 필요 {val_eval_end_idx}일, "
@@ -129,24 +166,25 @@ class WalkForwardTrainer:
         # 3. 날짜 배열 추출 및 기간 출력
         # ──────────────────────────────────────────
         val_train_dates  = all_dates[val_train_start_idx : val_train_end_idx]
-        val_eval_dates   = all_dates[val_train_end_idx   : val_eval_end_idx]
+        val_eval_dates   = all_dates[val_eval_start_idx  : val_eval_end_idx]   # ← 분리됨
         test_train_dates = all_dates[test_train_start_idx : test_train_end_idx]
-        test_eval_dates  = all_dates[test_train_end_idx   : test_eval_end_idx]
+        test_eval_dates  = all_dates[test_eval_start_idx  : test_eval_end_idx]  # ← 분리됨
 
         print(f"🚀 Walk-Forward Training (2-Fold)")
         print(f"   Target  : {self.target_col_name}  |  "
               f"Type: {self.target_type}  |  Horizons: {self.horizons}")
+        print(f"   Embargo : {G} 거래일 (train_end - {G}d → train_end 구간 제거)")
         print(f"\n   [검증 폴드]")
         print(f"   훈련: {pd.Timestamp(val_train_dates[0]).date()} ~ "
               f"{pd.Timestamp(val_train_dates[-1]).date()} "
-              f"({len(val_train_dates)} 거래일)")
+              f"({len(val_train_dates)} 거래일)  ← embargo {G}일 제거됨")
         print(f"   검증: {pd.Timestamp(val_eval_dates[0]).date()} ~ "
               f"{pd.Timestamp(val_eval_dates[-1]).date()} "
               f"({len(val_eval_dates)} 거래일)")
         print(f"\n   [테스트 폴드]")
         print(f"   훈련: {pd.Timestamp(test_train_dates[0]).date()} ~ "
               f"{pd.Timestamp(test_train_dates[-1]).date()} "
-              f"({len(test_train_dates)} 거래일)")
+              f"({len(test_train_dates)} 거래일)  ← embargo {G}일 제거됨")
         print(f"   테스트: {pd.Timestamp(test_eval_dates[0]).date()} ~ "
               f"{pd.Timestamp(test_eval_dates[-1]).date()} "
               f"({len(test_eval_dates)} 거래일)")
@@ -182,6 +220,7 @@ class WalkForwardTrainer:
         val_predictions = self._predict_with_metadata(full_val_slice, target_cols, fold='valid')
 
         print(f"   ✅ 검증 Avg RMSE: {valid_metrics['avg_rmse']:.6f}  "
+              f"| Avg IC: {valid_metrics['avg_ic']:.4f}  "
               f"(samples: {valid_metrics['samples']:,})")
 
         # ══════════════════════════════════════════
@@ -217,6 +256,7 @@ class WalkForwardTrainer:
         self.model = _prev_model  # 원복
 
         print(f"   ✅ 테스트 Avg RMSE: {test_metrics['avg_rmse']:.6f}  "
+              f"| Avg IC: {test_metrics['avg_ic']:.4f}  "
               f"(samples: {test_metrics['samples']:,})")
 
         return {
@@ -225,8 +265,9 @@ class WalkForwardTrainer:
             'test_metrics'     : test_metrics,
             'test_predictions' : test_predictions,
             'final_model'      : test_model,
-            'target_cols'      : target_cols,   # 04단계 역산에서 컬럼명 참조용
+            'target_cols'      : target_cols,
             'target_type'      : self.target_type,
+            'embargo_gap_days' : G,
         }
 
     # ──────────────────────────────────────────────────────────────
@@ -238,12 +279,12 @@ class WalkForwardTrainer:
         target_type에 따라 horizon별 타겟 컬럼을 df_run에 인플레이스로 추가하고
         컬럼명 리스트를 반환.
 
-        log_return 모드:
-            prefix = "target_log_return"  (target_col_name의 "log_close" → "log_return")
-            target_log_return_h{n}(t) = log_close(t+n) - log_close(t)
-
-        log_close 모드 (레거시):
+        log_close 모드 (기본값, v3.7.0~):
             target_log_close_h{n}(t) = log_close(t+n)
+
+        log_return 모드 (DEPRECATED v3.7.0):
+            prefix = "target_log_return"
+            target_log_return_h{n}(t) = log_close(t+n) - log_close(t)
         """
         target_cols = []
 
@@ -254,11 +295,10 @@ class WalkForwardTrainer:
             for h in self.horizons:
                 col_name = f"{prefix}_h{h}"
                 future_log_close = df_run.groupby('ticker')[self.target_col_name].shift(-h)
-                # 현재 시점의 log_close는 shift(0) — transform 없이 직접 사용
                 df_run[col_name] = future_log_close - df_run[self.target_col_name]
                 target_cols.append(col_name)
 
-        else:  # log_close (레거시)
+        else:  # log_close (기본값, 권장)
             for h in self.horizons:
                 col_name = f"{self.target_col_name}_h{h}"
                 df_run[col_name] = df_run.groupby('ticker')[self.target_col_name].shift(-h)
@@ -279,7 +319,6 @@ class WalkForwardTrainer:
         if isinstance(preds_df, np.ndarray):
             preds_df = pd.DataFrame(preds_df, index=eval_df.index, columns=target_cols)
 
-        # 예측값을 임시로 원본 df에 결합 (날짜별 그룹화를 위해)
         temp_eval = eval_df[[self.date_col]].copy()
         for col in target_cols:
             temp_eval[f'pred_{col}'] = preds_df[col].values
@@ -287,16 +326,16 @@ class WalkForwardTrainer:
 
         per_horizon = {}
         for col in target_cols:
-            # 1. RMSE 계산
+            # 1. RMSE
             y_true = temp_eval[f'true_{col}'].values
             y_pred = temp_eval[f'pred_{col}'].values
             mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
             rmse = np.sqrt(np.mean((y_true[mask] - y_pred[mask]) ** 2)) if mask.any() else np.nan
 
-            # 2. Daily Cross-Sectional IC 계산
+            # 2. Daily Cross-Sectional IC
             daily_ics = []
             for date, group in temp_eval.groupby(self.date_col):
-                if len(group) > 1:  # 상관계수 계산을 위해 최소 2개 종목 필요
+                if len(group) > 1:
                     g_true = group[f'true_{col}'].values
                     g_pred = group[f'pred_{col}'].values
                     g_mask = ~np.isnan(g_true) & ~np.isnan(g_pred)
@@ -304,27 +343,23 @@ class WalkForwardTrainer:
                         corr, _ = stats.spearmanr(g_true[g_mask], g_pred[g_mask])
                         if not np.isnan(corr):
                             daily_ics.append(corr)
-            
+
             ic_mean = np.mean(daily_ics) if daily_ics else np.nan
-            ic_std = np.std(daily_ics) if daily_ics else np.nan
-            icir = (ic_mean / ic_std) if (ic_std and ic_std > 0) else np.nan
+            ic_std  = np.std(daily_ics)  if daily_ics else np.nan
+            icir    = (ic_mean / ic_std) if (ic_std and ic_std > 0) else np.nan
 
             per_horizon[col] = {
-                'rmse': rmse,
+                'rmse'   : rmse,
                 'ic_mean': ic_mean,
-                'icir': icir
+                'icir'   : icir
             }
 
-        # 유효한 값들의 평균 계산
-        valid_rmses = [v['rmse'] for v in per_horizon.values() if not np.isnan(v['rmse'])]
-        valid_ics = [v['ic_mean'] for v in per_horizon.values() if not np.isnan(v['ic_mean'])]
-        
-        avg_rmse = float(np.mean(valid_rmses)) if valid_rmses else np.nan
-        avg_ic = float(np.mean(valid_ics)) if valid_ics else np.nan
+        valid_rmses = [v['rmse']    for v in per_horizon.values() if not np.isnan(v['rmse'])]
+        valid_ics   = [v['ic_mean'] for v in per_horizon.values() if not np.isnan(v['ic_mean'])]
 
         return {
-            'avg_rmse'    : avg_rmse,
-            'avg_ic'      : avg_ic,
+            'avg_rmse'    : float(np.mean(valid_rmses)) if valid_rmses else np.nan,
+            'avg_ic'      : float(np.mean(valid_ics))   if valid_ics   else np.nan,
             'per_horizon' : per_horizon,
             'samples'     : int(eval_df[target_cols].notna().all(axis=1).sum()),
         }
@@ -344,7 +379,7 @@ class WalkForwardTrainer:
             preds = pd.DataFrame(preds, index=eval_df.index, columns=target_cols)
 
         result = eval_df[[self.date_col, 'ticker']].copy().reset_index(drop=True)
-        preds = preds.reset_index(drop=True)
+        preds  = preds.reset_index(drop=True)
 
         for col in target_cols:
             result[f'pred_{col}'] = preds[col].values
