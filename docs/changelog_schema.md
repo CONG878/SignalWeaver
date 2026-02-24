@@ -203,10 +203,11 @@ results['embargo_gap_days']   # ✨ 적용된 embargo gap (= max(horizons))
 
 ```python
 # 매크로 피처 (99_meta/macro_regime.parquet에서 조인, feature_ 접두어 자동 부여)
-'feature_kospi_return'      # KOSPI 일간 로그 수익률
-'feature_usdkrw_return'     # USD/KRW 환율 변화율
+'feature_kospi'             # KOSPI 지수
+'feature_usd_krw'           # USD/KRW 환율
 'feature_vix'               # VIX 지수 (공포 지수)
-'feature_regime'            # 시장 레짐 (-1=Bear, 0=Neutral, 1=Bull, 인코딩)
+'feature_us_return_1d'      # 직전 거래일 미국 시장 수익률
+'feature_market_regime'     # 시장 레짐 (-1=Bear, 0=Neutral, 1=Bull, 인코딩)
 
 # 기업 정보 피처
 'feature_is_kospi'          # KOSPI=1 / KOSDAQ=0 (FDR StockListing 기반)

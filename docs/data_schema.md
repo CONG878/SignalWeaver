@@ -131,10 +131,6 @@ index.name = 'ticker'
 모든 학습 피처는 `feature_` 접두어를 가집니다.
 `feature_cols = [c for c in df.columns if c.startswith('feature_')]`로 자동 인식.
 
-#### 가격 관련 (Price)
-- `feature_log_return_1d`: `log(Close / Close_shift_1)`
-- `feature_close_shift_{d}`: d일 전 종가
-
 #### 기술적 지표 (Technical) — ✨ v3.6.0 변경
 - `feature_disparity_5`, `feature_disparity_60`: 이격도 `close/ma_n - 1` *(구: `feature_ma_5/60` 절대가격)*
 - `feature_rsi_14`: RSI(14)
@@ -150,10 +146,11 @@ index.name = 'ticker'
 #### 매크로/레짐 피처 (Macro) — ✨ v3.6.0 신규
 `data/99_meta/macro_regime.parquet`에서 날짜 기준 left join 후 `feature_` 접두어 부여.
 
-- `feature_kospi_return`: KOSPI 일간 로그 수익률
-- `feature_usdkrw_return`: USD/KRW 환율 변화율
+- `feature_kospi`: KOSPI 지수
+- `feature_usd_krw`: USD/KRW 환율
 - `feature_vix`: VIX 지수
-- `feature_regime`: 시장 레짐 (0=Bear, 1=Bull)
+- `feature_us_return_1d`: 직전 거래일 미국 시장 수익률
+- `feature_market_regime`: 시장 레짐 (-1=Bear, 0=Neutral, 1=Bull)
 
 #### 기업/캘린더 피처 — ✨ v3.6.0 신규
 - `feature_is_kospi`: KOSPI 상장 여부 (KOSPI=1, KOSDAQ=0)
