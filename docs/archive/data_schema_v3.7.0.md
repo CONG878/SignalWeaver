@@ -1,4 +1,4 @@
-﻿# 📄 Data Schema Definition (v3.7.1)
+﻿# 📄 Data Schema Definition (v3.7.0)
 
 본 스키마는 SignalWeaver 프로젝트의 데이터 계약을 정의합니다.
 
@@ -8,21 +8,14 @@
 
 | 속성 | 값 |
 |------|-----|
-| **Schema Version** | `3.7.1` |
-| **Last Updated** | 2026-02-24 |
-| **Latest Changes** | 04단계 버그 수정 — v3.6.0 피처 스키마 동기화 + 매크로 미래값 반영 |
-| **Compatibility** | v3.7.0 완전 호환 (재실행 불필요) |
+| **Schema Version** | `3.7.0` |
+| **Last Updated** | 2026-02-22 |
+| **Latest Changes** | 학습 무결성 개선 — log_close 롤백 + Embargo Gap 도입 |
+| **Compatibility** | v3.6.x 비호환 (타겟 컬럼명 변경) |
 
 ---
 
 ## 🔄 최근 변경 이력 요약
-
-### v3.7.1 (2026-02-24) - 🔵 PATCH
-- **04단계 피처 스키마 동기화**: `calculate_features_for_ticker` 함수가 v3.6.0 이전 스키마(`feature_ma_*`, `feature_bb_upper/lower`, `liquidity_score`)를 사용하던 누락 업데이트 수정. builder.py v3.6.0과 일치하도록 재작성.
-- **97단계 신설**: `97_forecast_macro.ipynb` — 매크로 지표 미래값 추정 파이프라인. Damped Holt(kospi, usd_krw, vix) 및 SES(us_return_1d) 적용.
-- **매크로 미래값 반영**: 04단계 Recursive Extension 루프에서 미래 날짜의 매크로 피처가 NaN으로 채워지던 버그 수정. `macro_regime_forecast.parquet` 로드 및 조인 로직 추가.
-- **정적/캘린더 피처 반영**: `new_row` 구성 시 `feature_is_kospi`, `feature_is_monday`, `feature_is_friday` 누락 수정.
-- **모델 로드 방식 수정**: `pickle.load()` 직접 호출 → `Model.load()` 클래스메서드 사용으로 수정.
 
 ### v3.7.0 (2026-02-22) - 🟢 MINOR
 - **log_return deprecated → log_close 롤백**: 피처 확장 이후 성능 열위 확인. `target_type="log_return"` 사용 시 `DeprecationWarning` 발생. 타겟 컬럼명 `target_log_return_h{n}` → `target_log_close_h{n}` 복원.
@@ -97,9 +90,8 @@ data/05_universe/{YYYYMMDD}/
 
 # 전역 메타 데이터 (✨ v3.6.0 신설)
 data/99_meta/
-  ├── krx_calendar.csv                  # 영업일 캘린더
-  ├── macro_regime.parquet              # 매크로/레짐 데이터 (98단계 출력, 과거 실측)
-  └── macro_regime_forecast.parquet     # 매크로/레짐 미래 추정값 (97단계 출력) ✨ v3.7.1
+  ├── krx_calendar.csv           # 영업일 캘린더
+  └── macro_regime.parquet       # 매크로/레짐 데이터 (98단계 출력)
 ```
 
 ---
@@ -365,36 +357,20 @@ columns = [
 
 ## 📌 9. Step 99_meta - 전역 메타 데이터 스키마 (✨ v3.6.0 신설)
 
-### 9.1 macro_regime.parquet (98단계 출력 — 과거 실측값)
+### 9.1 macro_regime.parquet (98단계 출력)
 
 ```python
 columns = [
     'date',              # 거래일
-    'kospi',             # KOSPI 지수
-    'usd_krw',           # USD/KRW 환율
+    'kospi_return',      # KOSPI 일간 로그 수익률
+    'usdkrw_return',     # USD/KRW 환율 변화율
     'vix',               # VIX 지수
-    'us_return_1d',      # 직전 거래일 미국 시장 수익률
-    'market_regime',     # 시장 레짐 (-1=Bear, 0=Neutral, 1=Bull)
+    'regime',            # 시장 레짐 (-1=Bear, 0=Neutral 1=Bull)
 ]
 # 02단계에서 조인 시 컬럼명에 feature_ 접두어 자동 부여
 ```
 
-### 9.2 macro_regime_forecast.parquet (97단계 출력 — 미래 추정값) ✨ v3.7.1
-
-```python
-# macro_regime.parquet와 동일한 스키마. 미래 영업일 행만 포함.
-# 04단계에서 macro_regime.parquet와 concat 후 left join.
-columns = [
-    'date',              # 미래 거래일 (krx_calendar.csv 기준)
-    'kospi',             # Damped Holt 추정값 (φ=0.90)
-    'usd_krw',           # Damped Holt 추정값 (φ=0.85)
-    'vix',               # Damped Holt 추정값 (φ=0.85)
-    'us_return_1d',      # SES 추정값 (zero 수렴)
-    'market_regime',     # kospi 추정값으로 재계산 (98단계 동일 로직)
-]
-```
-
-### 9.3 krx_calendar.csv
+### 9.2 krx_calendar.csv
 
 ```python
 columns = ['date']   # 영업일 날짜 목록 (datetime)
@@ -407,18 +383,14 @@ columns = ['date']   # 영업일 날짜 목록 (datetime)
 ```
 [98 Meta] (선행 실행)
   98_save_macro_data.ipynb
-  → data/99_meta/macro_regime.parquet  (과거 실측값)
-
-[97 Macro Forecast] (✨ v3.7.1 신설, 04단계 전 선행 실행)
-  97_forecast_macro.ipynb
-  → data/99_meta/macro_regime_forecast.parquet  (미래 추정값)
+  → data/99_meta/macro_regime.parquet
         │
-        ▼ (두 파일 concat 후 date 기준 left join)
+        ▼ (date 기준 left join)
 [02 Processed]
   dataset.parquet
   └─ target_log_close (기준값)
   └─ feature_disparity_*, feature_bb_pct_b, feature_log_liquidity (scale-invariant)
-  └─ feature_kospi, feature_usd_krw, feature_vix, feature_us_return_1d, feature_market_regime (매크로)
+  └─ feature_kospi_return, feature_vix, feature_regime (매크로)
   └─ feature_is_kospi, feature_is_monday/friday (기업/캘린더)
         │
         ▼
@@ -439,8 +411,7 @@ columns = ['date']   # 영업일 날짜 목록 (datetime)
   test_predictions 최종 성능 확인
         │
         ▼
-[04 Forecasts] (✨ v3.7.1: 매크로/정적/캘린더 피처 완전 반영)
-  macro_regime.parquet + macro_regime_forecast.parquet → concat → date 기준 조회
+[04 Forecasts]
   log_close 모드: pred_log_close = model.predict(X)
   → future_forecasts.parquet (pred_log_close, pred_close)
         │
@@ -515,7 +486,6 @@ PATCH: 버그 수정
 
 | Version | Date | Type | 주요 변경 사항 |
 |---------|------|------|----------------|
-| **3.7.1** | 2026-02-24 | 🔵 PATCH | 04단계 피처 스키마 동기화 + 97단계 신설 |
 | **3.7.0** | 2026-02-22 | 🟢 MINOR | log_close 롤백 + Embargo Gap |
 | **3.6.0** | 2026-02-21 | 🟢 MINOR | Scale-invariant 피처 + IC 평가 + 매크로 통합 |
 | **3.5.0** | 2026-02-20 | 🟢 MINOR | 2-Fold 구조 + log_return 타겟 (현재 deprecated) |
@@ -529,7 +499,7 @@ PATCH: 버그 수정
 
 ---
 
-**Last Updated**: 2026-02-24
-**Schema Version**: 3.7.1
+**Last Updated**: 2026-02-22
+**Schema Version**: 3.7.0
 **Status**: ✅ Stable
 **Maintained by**: SignalWeaver Team

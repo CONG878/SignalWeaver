@@ -1,9 +1,144 @@
-﻿# Schema Changelog (Updated v3.7.0)
+﻿# Schema Changelog (Updated v3.7.1)
 
 All notable changes to the data schema will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [3.7.1] - 2026-02-24
+
+### 🔵 PATCH Changes — 04단계 버그 수정 및 97단계 신설
+
+변경 범위: **04단계 (Forecasts), 97단계 (신설)**
+01, 02, 03, 05단계 스키마 변경 없음. v3.7.0 산출물 재실행 불필요.
+
+---
+
+#### 1. 04단계 `calculate_features_for_ticker` 스키마 동기화
+
+**배경:**
+v3.6.0에서 `src/features/builder.py`의 피처 스키마가 변경되었으나,
+`04_forecast_future.ipynb` 내부의 `calculate_features_for_ticker` 함수가
+이전 버전(v3.5.0) 스키마를 그대로 사용하고 있었습니다.
+이로 인해 04단계 Recursive Extension 루프에서 모델이 학습 때와 다른 피처를 입력받는 버그가 발생했습니다.
+
+**수정 내용 — 피처 스키마 v3.6.0 일치:**
+
+| 이전 (누락 업데이트) | 이후 (v3.6.0 일치) |
+|---|---|
+| `feature_ma_5`, `feature_ma_60` (절대 가격) | `feature_ma_5_disparity`, `feature_ma_60_disparity` (이격도) |
+| `feature_bb_upper`, `feature_bb_lower` (절대 가격) | `feature_bb_pct_b`, `feature_bb_width` (무차원) |
+| `liquidity_score` (원화 거래대금) | `feature_log_liquidity` (로그 변환) |
+
+**수정된 파일:**
+- 🔧 `04_forecast_future.ipynb` — `calculate_features_for_ticker` 재작성
+
+---
+
+#### 2. 04단계 매크로/정적/캘린더 피처 미래값 반영
+
+**배경:**
+Recursive Extension 루프에서 `new_row`(미래 예측 행)를 `df_ticker`에 추가할 때
+매크로 피처(`feature_kospi` 등), 정적 피처(`feature_is_kospi`),
+캘린더 피처(`feature_is_monday/friday`)가 채워지지 않아 NaN이 누적되는 버그가 있었습니다.
+
+**수정 내용:**
+
+```python
+# new_row 구성 시 추가된 항목 (✨ v3.7.1)
+new_row = {
+    # 기존 OHLCV ...
+
+    # 매크로 피처: macro_regime.parquet + macro_regime_forecast.parquet 조회
+    **get_macro_row(pred_date),          # feature_kospi, feature_usd_krw 등
+
+    # 정적 피처: df_features에서 ticker별 마지막값 추출
+    'feature_is_kospi'  : is_kospi_val,
+
+    # 캘린더 피처: pred_date에서 직접 계산
+    'feature_is_monday' : int(pred_date.weekday() == 0),
+    'feature_is_friday' : int(pred_date.weekday() == 4),
+}
+```
+
+**수정된 파일:**
+- 🔧 `04_forecast_future.ipynb` — 매크로 로드 셀 신설, `new_row` 구성 확장
+
+---
+
+#### 3. 04단계 모델 로드 방식 수정
+
+**배경:**
+모델 로드 시 `pickle.load()`를 직접 호출하면 저장된 dict가 그대로 반환되어
+`model.feature_list` 접근 시 `AttributeError`가 발생했습니다.
+
+**수정 내용:**
+
+```python
+# Before (버그)
+import pickle
+with open(model_path, 'rb') as f:
+    model = pickle.load(f)   # → dict 반환, feature_list 없음
+
+# After (수정)
+# active_model 설정에 따라 클래스메서드로 로드
+if active_model == 'lightgbm':
+    model = LightGBMModel.load(str(model_path))
+elif active_model == 'randomforest':
+    model = RandomForestMultiModel.load(str(model_path))
+elif active_model == 'ensemble':
+    model = EnsembleModel.load(str(model_path))
+```
+
+**수정된 파일:**
+- 🔧 `04_forecast_future.ipynb` — 모델 로드 셀 수정
+
+---
+
+#### 4. 97단계 신설 — 매크로 지표 미래값 추정
+
+**배경:**
+04단계 Recursive Extension에서 미래 날짜의 매크로 피처가 NaN이 되는 근본 원인은
+`macro_regime.parquet`에 미래 날짜 데이터가 존재하지 않기 때문입니다.
+거시 지표는 종목별 지표와 독립적이므로, 별도 파이프라인으로 추정합니다.
+
+**추정 방법:**
+
+| 지표 | 방법 | 근거 |
+|------|------|------|
+| `kospi` | Damped Holt (φ=0.90) | 레벨 시계열, 추세 반영 후 감쇠 |
+| `usd_krw` | Damped Holt (φ=0.85) | 레벨 시계열, 코스피보다 강한 감쇠 |
+| `vix` | Damped Holt (φ=0.85) | 레벨 시계열, 평균회귀 성격 |
+| `us_return_1d` | SES | 정상 시계열, zero 근방 수렴 |
+| `market_regime` | kospi 추정값으로 재계산 | 98단계 동일 로직 재사용 |
+
+**신설 파일:**
+- 📄 `97_forecast_macro.ipynb` — 매크로 미래값 추정 및 저장
+- 📁 `data/99_meta/macro_regime_forecast.parquet` — 추정 결과 (과거 실측과 동일 스키마)
+
+**설계 원칙:**
+- `macro_regime.parquet` 원본은 수정하지 않음 (98단계 재실행 시 오염 없음)
+- 독립 실행 가능 — SignalWeaver 메인 파이프라인 밖에서도 활용 가능
+
+**실행 순서:**
+```
+98_save_macro_data.ipynb  →  97_forecast_macro.ipynb  →  01 ~ 05단계
+```
+
+---
+
+### 호환성 (v3.7.0 → v3.7.1)
+
+**완전 호환 (재실행 불필요):**
+- 01, 02, 03단계: 변경 없음
+- 04단계: 출력 스키마(`future_forecasts.parquet`) 변경 없음. 내부 계산 정확도만 개선.
+- 05단계: 입력 스키마 변경 없음
+
+**권장 사항:**
+- 04단계를 재실행하면 NaN 피처 누적으로 인한 비정상 예측이 개선됨
+- 재실행 전 97단계(`97_forecast_macro.ipynb`) 선행 실행 필요
 
 ---
 
@@ -310,10 +445,11 @@ accuracy_score = spearmanr(pred_log_close, true_log_close).correlation
 # data/99_meta/macro_regime.parquet
 columns = [
     'date',              # 거래일
-    'kospi_return',      # KOSPI 일간 로그 수익률
-    'usdkrw_return',     # USD/KRW 환율 변화율
+    'kospi',             # KOSPI 지수
+    'usd_krw',           # USD/KRW 환율
     'vix',               # VIX 지수
-    'regime',            # 시장 레짐 (0=Bear, 1=Bull)
+    'us_return_1d',      # 직전 거래일 미국 시장 수익률
+    'market_regime',     # 시장 레짐 (-1=Bear, 0=Neutral, 1=Bull)
 ]
 # → 02_build_dataset.ipynb에서 조인 후 feature_ 접두어 부여
 ```
@@ -333,7 +469,7 @@ data/99_meta/               # ✨ v3.6.0 신설
 **비호환 (재실행 필요):**
 - 02단계 재실행 필수
   - 피처 컬럼명 변경: `feature_ma_{n}` → `feature_disparity_{n}`, `feature_bb_*` → `feature_bb_pct_b/bandwidth`
-  - 신규 컬럼: `feature_log_liquidity`, `feature_is_kospi`, `feature_is_monday/friday`, `feature_kospi_return` 등
+  - 신규 컬럼: `feature_log_liquidity`, `feature_is_kospi`, `feature_is_monday/friday`, `feature_kospi`, `feature_usd_krw` 등
   - 제거 컬럼: `sector`, `feature_ma_5/60`, `feature_bb_upper/lower`, `liquidity_score`
 - 03단계 재실행 필수 (피처 컬럼 변경에 따른 모델 재학습)
 - 98단계 선행 실행 필요 (`macro_regime.parquet` 미존재 시 02단계 경고 출력 후 매크로 피처 제외)
@@ -569,7 +705,7 @@ Initial Release. Step 1~3 (수집 → Feature → LightGBM 학습).
 
 ---
 
-**Last Updated**: 2026-02-22
-**Schema Version**: 3.7.0
+**Last Updated**: 2026-02-24
+**Schema Version**: 3.7.1
 **Status**: ✅ Stable
 **Maintained by**: SignalWeaver Team
