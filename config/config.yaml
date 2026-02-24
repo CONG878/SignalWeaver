@@ -1,12 +1,12 @@
 # SignalWeaver 프로젝트 공통 설정
 project:
   name: "SignalWeaver"
-  reference_date: "20260220"
+  reference_date: "20260223"
 
 # 01_collect_data 관련 설정
 data_collection:
-  start_date: "20230512"
-  end_date: "20260220"
+  start_date: "20230515"
+  end_date: "20260223"
   save_csv: True
   save_parquet: True
   min_sleep: 0.05
@@ -21,26 +21,31 @@ preprocessing:
   save_csv: True
   save_parquet: True
 
-# 03_train_predict 관련 설정 (v3.5.0: 2-Fold + log_return 타겟)
+# 03_train_predict 관련 설정 (v3.7.0: log_close 롤백 + embargo gap 추가)
 training:
   # 검증 폴드 훈련 종료일
   # 테스트 폴드 훈련 종료일 = train_end + valid_window_days 거래일
-  train_end: "2025-08-13"
+  train_end: "2025-08-14"
+
+  # ✨ v3.7.0: Embargo Gap
+  # embargo_gap_days는 max(horizons)로 자동 계산됩니다 — 별도 설정 불필요.
+  # horizons를 변경하면 gap이 자동으로 연동됩니다.
 
   # 검증 윈도우 크기 (거래일)
   # 동시에 테스트 폴드의 훈련 구간 롤링 offset으로 사용됨
   valid_window_days: 60
 
   # 테스트 윈도우 크기 (거래일)
-  # 엄밀히 valid_window_days와 다를 수 있으나 보통 동일하게 설정
   test_window_days: 60
 
   # 02단계에서 생성된 기준 타겟 컬럼 (log_close 값을 담고 있어야 함)
   target_col_name: "target_log_close"
 
   # 타겟 타입
-  # "log_return": target_log_return_h{n} = log_close(t+n) - log_close(t)  [권장]
-  # "log_close" : target_log_close_h{n}  = log_close(t+n)                [레거시]
+  # "log_close"  : target_log_close_h{n} = log_close(t+n)  [기본값, 권장]
+  # "log_return" : target_log_return_h{n} = log_close(t+n) - log_close(t)
+  #                ⚠️ DEPRECATED v3.6.0: 피처 확장 후 log_close 대비 성능 열위.
+  #                   원인 분석 완료 전까지 사용 금지.
   target_type: "log_close"
 
   # 예측하고자 하는 시차(영업일) 리스트
@@ -63,19 +68,26 @@ training:
   # RandomForest 전용 파라미터
   randomforest_params:
     n_estimators: 40
-    max_depth: 8
-    min_samples_split: 10
-    min_samples_leaf: 5
+    max_depth: 15
+    min_samples_split: 125
+    min_samples_leaf: 50
     n_jobs: -1
     random_state: 42
     max_samples: 0.6
 
 # 05_universe_selection 관련설정
 universe:
-  model_date: "20260220"
+  model_date: "20260223"
 
 # 모델 선택: 'lightgbm', 'randomforest' or 'ensemble'
 active_model: "lightgbm"
+
+# 전략 및 운용 관련 설정
+strategy:
+  min_hold_days: 5
+  # [v3.7.2] 비현실적인 급등 수익률 필터링 임계값 (단위: 비율)
+  # 내부적으로 np.log1p(0.16)으로 변환되어 처리됨
+  max_daily_return: 0.16
 
 # 📂 경로 설정
 paths:
@@ -89,6 +101,6 @@ paths:
 
 # 캘린더 설정
 calendar:
-  start_date: "2026-02-23"
-  end_date: "2026-05-20"
+  start_date: "2026-02-24"
+  end_date: "2026-05-21"
   prefer_mcal: True
