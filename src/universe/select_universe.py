@@ -243,7 +243,7 @@ def evaluate_expected_returns(
 
             total_log_return = log_prices[sell_idx] - log_prices[buy_idx]
             total_return_pct = np.expm1(total_log_return) * 100
-            annualized_return = daily_log_return * 243
+            annualized_return = daily_log_return * 244.5
 
             return_metrics.append({
                 'ticker'           : ticker,

@@ -1,12 +1,12 @@
 # SignalWeaver 프로젝트 공통 설정
 project:
   name: "SignalWeaver"
-  reference_date: "20260223"
+  reference_date: "20260227"
 
 # 01_collect_data 관련 설정
 data_collection:
-  start_date: "20230515"
-  end_date: "20260223"
+  start_date: "20230519"
+  end_date: "20260227"
   save_csv: True
   save_parquet: True
   min_sleep: 0.05
@@ -25,7 +25,7 @@ preprocessing:
 training:
   # 검증 폴드 훈련 종료일
   # 테스트 폴드 훈련 종료일 = train_end + valid_window_days 거래일
-  train_end: "2025-08-14"
+  train_end: "2025-08-21"
 
   # ✨ v3.7.0: Embargo Gap
   # embargo_gap_days는 max(horizons)로 자동 계산됩니다 — 별도 설정 불필요.
@@ -68,19 +68,32 @@ training:
   # RandomForest 전용 파라미터
   randomforest_params:
     n_estimators: 40
-    max_depth: 15
-    min_samples_split: 125
-    min_samples_leaf: 50
+    max_depth: 16
+    min_samples_split: 150
+    min_samples_leaf: 75
     n_jobs: -1
     random_state: 42
-    max_samples: 0.6
+    max_samples: 0.5
+
+  # MLP 전용 파라미터
+  mlp_params:
+    hidden_dims: [128, 64, 32, 32, 16]
+    dropout_rates: [0.2, 0.2, 0.1, 0.0, 0.0]
+    learning_rate: 0.001
+    batch_size: 2048
+    epochs: 200
+    patience: 15
+    weight_decay: 0.0001
 
 # 05_universe_selection 관련설정
 universe:
-  model_date: "20260223"
+  model_date: "20260226"
 
-# 모델 선택: 'lightgbm', 'randomforest' or 'ensemble'
-active_model: "lightgbm"
+# 모델 선택: 단일 모델 OR 앙상블
+# 3모델 이상 확장에 따라 'ensemble' 제외
+# 단일 모델: 'lightgbm' | 'randomforest' | 'mlp'
+# 앙상블: 'mlp+lgbm' | 'lgbm+rf' | 'rf+mlp' | 'mlp+lgbm+rf'
+active_model: "mlp+lgbm+rf"
 
 # 전략 및 운용 관련 설정
 strategy:
@@ -101,6 +114,6 @@ paths:
 
 # 캘린더 설정
 calendar:
-  start_date: "2026-02-24"
-  end_date: "2026-05-21"
+  start_date: "2026-03-03"
+  end_date: "2026-05-27"
   prefer_mcal: True

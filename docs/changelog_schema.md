@@ -1,9 +1,225 @@
-﻿# Schema Changelog (Updated v3.7.1)
+﻿# Schema Changelog (Updated v3.8.0)
 
 All notable changes to the data schema will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [3.8.0] - 2026-02-28
+
+### 🟢 MINOR Changes — MLP 모델 도입 및 앙상블 확장성
+
+변경 범위: **03단계 (Training), 03b단계 (Ensemble), 04단계 (Forecasts), src/utils, src/models**
+01, 02, 05단계 스키마 변경 없음.
+
+---
+
+#### 1. MLP Multi-output 모델 신설
+
+**배경:**
+LightGBM(타겟별 독립 Booster)·RandomForest(MultiOutputRegressor)와 달리,
+단일 네트워크가 h1~h5를 동시에 출력하는 공유 잠재 표현(shared representation) 구조의
+세 번째 모델을 도입합니다. MultiOutputRegressor 없이 진정한 단일 모델로 다중 출력을 구현합니다.
+
+**신규 파일:**
+- 📄 `src/models/mlp_model.py` — `MLPModel` 클래스
+
+**아키텍처:**
+
+```
+Input(feature_dim)
+  → [Linear → BatchNorm1d → ReLU → Dropout(rate)] × len(hidden_dims)
+  → Linear(output_dim)      # output_dim = len(horizons) = 5
+```
+
+**설계 결정:**
+- PyTorch 기반 구현 (CPU 환경)
+- `StandardScaler` 내부 캡슐화 — fit/predict/save/load 일관성 보장
+- `eval_set` 기반 Early Stopping 지원 (Trainer 계약 준수)
+- `drop_last=True` (훈련 DataLoader) — BatchNorm1d 배치 크기 1 오류 방지
+- 손실 함수: MSELoss
+
+**config.yaml 추가:**
+
+```yaml
+training:
+  mlp_params:
+    hidden_dims:    [128, 64, 32, 32, 16]
+    dropout_rates:  [0.2, 0.2, 0.1, 0.0, 0.0]   # 레이어별 지정, 0.0이면 Dropout 미추가
+    learning_rate:  0.001
+    batch_size:     2048
+    epochs:         200
+    patience:       15
+    weight_decay:   0.0001
+```
+
+**Trainer 호환성:**
+`WalkForwardTrainer`의 `model.fit(X, y, eval_set=[...], **fit_kwargs)` 시그니처를
+그대로 준수합니다. `epochs`, `patience`는 `fit_kwargs`로 전달됩니다.
+Trainer 코드 수정 없음.
+
+**수정된 파일:**
+- ✨ `src/models/mlp_model.py` — 신규 생성
+- 🔧 `config/config.yaml` — `mlp_params` 섹션 추가
+- 🔧 `03_train_predict.ipynb` — `mlp` 분기 추가
+
+---
+
+#### 2. 앙상블 확장성 — 모델 조합 동적 지정
+
+**배경:**
+기존 `active_model: 'ensemble'`은 고정된 LGBM+RF 조합만 지원했습니다.
+세 번째 모델(MLP) 추가와 함께 임의의 모델 조합을 지정할 수 있도록 확장합니다.
+
+**`active_model` 필드 변경:**
+
+```yaml
+# Before (v3.7.x): 고정 조합
+active_model: "ensemble"   # 항상 LGBM+RF
+
+# After (v3.8.0): '+' 구분자로 조합 지정
+active_model: "lgbm+rf"        # 2-model
+active_model: "lgbm+mlp"       # 2-model
+active_model: "lgbm+rf+mlp"    # 3-model
+active_model: "lightgbm"       # 단일 모델 (하위 호환)
+```
+
+**모델 이름 정칭/약칭 대응표:**
+
+| 허용 입력 | canonical (단일 모델 폴더) | short (앙상블 폴더 구성) |
+|---|---|---|
+| `lightgbm`, `lgbm` | `lightgbm` | `lgbm` |
+| `randomforest`, `rf` | `randomforest` | `rf` |
+| `mlp` | `mlp` | `mlp` |
+
+**폴더명 결정 규칙:**
+
+```
+단일 모델 → canonical 정칭 사용 (하위 호환)
+앙상블    → short 약칭을 '+' 로 연결
+
+active_model: "lightgbm"              → data/.../lightgbm/
+active_model: "lgbm+rf"              → data/.../lgbm+rf/
+active_model: "lightgbm+randomforest+mlp" → data/.../lgbm+rf+mlp/
+```
+
+**가중치 최적화:** SLSQP(sum=1 등식 제약) 방법 적용.
+입력 순서(`"rf+mlp"` vs `"mlp+rf"`)와 무관하게 동일한 최적 IC를 산출하며,
+경계값 수렴(`[1.0, 0.0]`) 문제가 완화됩니다.
+
+**신규 헬퍼 함수 (`src/utils/config.py`):**
+
+```python
+resolve_model_name(name)       → (canonical, short)
+parse_active_model(str)        → List[(canonical, short)]
+is_ensemble(str)               → bool
+get_folder_name(str)           → str   # 폴더명 반환
+```
+
+**`ProjectPaths` 변경:**
+- `folder_name` 필드 추가 — `get_folder_name()` 기반으로 자동 결정
+- `training_dir` / `forecasts_dir` / `universe_dir`가 `folder_name` 기반으로 동적 결정
+- `get_member_model_dir(alias)` 추가 — 앙상블 구성 시 개별 모델 폴더 참조용
+
+**수정된 파일:**
+- 🔧 `src/utils/config.py` — 헬퍼 함수 4개 신설, `ProjectPaths` 확장
+- 🔧 `config/config.yaml` — `active_model` 주석 업데이트
+- 🔧 `03_train_predict.ipynb` — `is_ensemble()` 조기 차단, 약칭 허용
+- 🔧 `03b_train_ensemble.ipynb` — 전면 재작성 (동적 로드)
+- 🔧 `04_forecast_future.ipynb` — `load_model` 셀: `is_ensemble()` / `resolve_model_name()` 기반 동적 로드
+
+---
+
+#### 3. 04단계 예측 실패 종목 건너뜀 및 보고
+
+**배경:**
+Recursive Extension 중 특정 종목에서 피처에 `inf`가 발생할 경우
+(`StandardScaler.transform()` 오류 등) 전체 파이프라인이 중단되는 문제가 있었습니다.
+
+**수정 내용:**
+종목별 루프를 `try/except`로 감싸 예측 실패 시 해당 종목을 건너뛰고,
+`skipped_tickers` 목록에 `(ticker, ErrorType, message)`를 수집합니다.
+루프 완료 후 제외 종목 수 및 상세 목록을 출력합니다.
+
+```python
+# 루프 완료 후 출력 예시
+✅ Recursive Extension 완료
+   성공: 847개 / 전체: 850개
+
+⚠️  제외된 종목: 3개
+   Ticker       ErrorType                 Message
+   005930       ValueError                Input X contains infinity...
+```
+
+**수정된 파일:**
+- 🔧 `04_forecast_future.ipynb` — `recursive_predict` 셀 패치
+
+---
+
+### 호환성 (v3.7.x → v3.8.0)
+
+**비호환 (재실행 필요):**
+- `active_model: "ensemble"`을 사용하던 경우 `"lgbm+rf"`로 변경 필요
+  (기존 `ensemble/` 폴더는 `lgbm+rf/`로 이동 또는 재실행)
+
+**호환 (재실행 불필요):**
+- 단일 모델(`lightgbm`, `randomforest`) 운용: 변경 없음
+- 01, 02, 03, 05단계 산출물: 변경 없음
+
+---
+
+## [3.7.2] - 2026-02-25
+
+### 🔵 PATCH Changes — 비현실적 수익률 거래 필터링
+
+변경 범위: **05단계 (Universe), `src/utils/trading.py`, `src/universe/select_universe.py`**
+01~04단계 스키마 변경 없음.
+
+---
+
+#### 1. 일평균 수익률 상한 필터링
+
+**배경:**
+Recursive Extension 예측 결과에서 비현실적으로 급등하는 종목이 투자 후보로 선정되는
+사례가 발생했습니다. 최적 거래(매수·매도 시점) 탐색 시 일평균 로그 수익률이
+설정 상한을 초과하는 거래는 건너뛰고 차선 거래를 제안합니다.
+
+**설정 추가 (`config.yaml`):**
+
+```yaml
+strategy:
+  max_daily_return: 0.16   # 일평균 수익률 상한 (비율)
+                           # 내부적으로 np.log1p(0.16)으로 변환하여 처리
+```
+
+**처리 방식:**
+
+```python
+# utils/trading.py, universe/select_universe.py 내부
+max_log_return = np.log1p(cfg['strategy']['max_daily_return'])
+
+# 최적 거래 탐색 루프에서
+daily_log_return = total_log_return / hold_days
+if daily_log_return > max_log_return:
+    continue   # 건너뜀 → 차선 거래로 이동
+```
+
+**수정된 파일:**
+- 🔧 `src/utils/trading.py` — 일평균 수익률 검사 로직 추가
+- 🔧 `src/universe/select_universe.py` — `max_daily_return` 파라미터 연동
+- 🔧 `config/config.yaml` — `strategy.max_daily_return` 추가
+
+---
+
+### 호환성 (v3.7.1 → v3.7.2)
+
+**호환 (재실행 불필요):**
+- 01~04단계: 변경 없음
+- 05단계: 입력 스키마 변경 없음, 출력 필터링 결과만 달라짐
+- `config.yaml`에 `strategy.max_daily_return`이 없을 경우 기존 동작 유지
+  (`trading.py`에서 키 부재 시 필터 미적용으로 처리 권장)
 
 ---
 
@@ -47,17 +263,9 @@ Recursive Extension 루프에서 `new_row`(미래 예측 행)를 `df_ticker`에 
 **수정 내용:**
 
 ```python
-# new_row 구성 시 추가된 항목 (✨ v3.7.1)
 new_row = {
-    # 기존 OHLCV ...
-
-    # 매크로 피처: macro_regime.parquet + macro_regime_forecast.parquet 조회
-    **get_macro_row(pred_date),          # feature_kospi, feature_usd_krw 등
-
-    # 정적 피처: df_features에서 ticker별 마지막값 추출
+    **get_macro_row(pred_date),
     'feature_is_kospi'  : is_kospi_val,
-
-    # 캘린더 피처: pred_date에서 직접 계산
     'feature_is_monday' : int(pred_date.weekday() == 0),
     'feature_is_friday' : int(pred_date.weekday() == 4),
 }
@@ -70,20 +278,11 @@ new_row = {
 
 #### 3. 04단계 모델 로드 방식 수정
 
-**배경:**
-모델 로드 시 `pickle.load()`를 직접 호출하면 저장된 dict가 그대로 반환되어
-`model.feature_list` 접근 시 `AttributeError`가 발생했습니다.
-
 **수정 내용:**
 
 ```python
-# Before (버그)
-import pickle
-with open(model_path, 'rb') as f:
-    model = pickle.load(f)   # → dict 반환, feature_list 없음
-
-# After (수정)
-# active_model 설정에 따라 클래스메서드로 로드
+# Before: pickle.load() 직접 호출 → dict 반환, AttributeError 발생
+# After:  클래스메서드 사용
 if active_model == 'lightgbm':
     model = LightGBMModel.load(str(model_path))
 elif active_model == 'randomforest':
@@ -99,216 +298,72 @@ elif active_model == 'ensemble':
 
 #### 4. 97단계 신설 — 매크로 지표 미래값 추정
 
-**배경:**
-04단계 Recursive Extension에서 미래 날짜의 매크로 피처가 NaN이 되는 근본 원인은
-`macro_regime.parquet`에 미래 날짜 데이터가 존재하지 않기 때문입니다.
-거시 지표는 종목별 지표와 독립적이므로, 별도 파이프라인으로 추정합니다.
-
-**추정 방법:**
-
-| 지표 | 방법 | 근거 |
-|------|------|------|
-| `kospi` | Damped Holt (φ=0.90) | 레벨 시계열, 추세 반영 후 감쇠 |
-| `usd_krw` | Damped Holt (φ=0.85) | 레벨 시계열, 코스피보다 강한 감쇠 |
-| `vix` | Damped Holt (φ=0.85) | 레벨 시계열, 평균회귀 성격 |
-| `us_return_1d` | SES | 정상 시계열, zero 근방 수렴 |
-| `market_regime` | kospi 추정값으로 재계산 | 98단계 동일 로직 재사용 |
-
 **신설 파일:**
-- 📄 `97_forecast_macro.ipynb` — 매크로 미래값 추정 및 저장
-- 📁 `data/99_meta/macro_regime_forecast.parquet` — 추정 결과 (과거 실측과 동일 스키마)
+- 📄 `97_forecast_macro.ipynb`
+- 📁 `data/99_meta/macro_regime_forecast.parquet`
 
-**설계 원칙:**
-- `macro_regime.parquet` 원본은 수정하지 않음 (98단계 재실행 시 오염 없음)
-- 독립 실행 가능 — SignalWeaver 메인 파이프라인 밖에서도 활용 가능
+```python
+# data/99_meta/macro_regime_forecast.parquet
+columns = [
+    'date',          # 미래 거래일
+    'kospi',         # Damped Holt 추정값 (φ=0.90)
+    'usd_krw',       # Damped Holt 추정값 (φ=0.85)
+    'vix',           # Damped Holt 추정값 (φ=0.85)
+    'us_return_1d',  # SES 추정값 (zero 수렴)
+    'market_regime', # kospi 추정값 기반 재계산
+]
+```
 
-**실행 순서:**
-```
-98_save_macro_data.ipynb  →  97_forecast_macro.ipynb  →  01 ~ 05단계
-```
+**수정된 파일:**
+- ✨ `97_forecast_macro.ipynb` — 신규 생성
 
 ---
 
 ### 호환성 (v3.7.0 → v3.7.1)
 
-**완전 호환 (재실행 불필요):**
-- 01, 02, 03단계: 변경 없음
-- 04단계: 출력 스키마(`future_forecasts.parquet`) 변경 없음. 내부 계산 정확도만 개선.
-- 05단계: 입력 스키마 변경 없음
-
-**권장 사항:**
-- 04단계를 재실행하면 NaN 피처 누적으로 인한 비정상 예측이 개선됨
-- 재실행 전 97단계(`97_forecast_macro.ipynb`) 선행 실행 필요
+**호환 (재실행 불필요):** 01~03단계, 05단계 변경 없음.
+**04단계만 재실행 필요** (피처 스키마 동기화 효과 적용).
+97단계 선행 실행 후 04단계 실행 권장 (매크로 미래값 반영).
 
 ---
 
 ## [3.7.0] - 2026-02-22
 
-### 🟢 MINOR Changes - Training Integrity
+### 🟢 MINOR Changes - log_close 롤백 + Embargo Gap
 
 변경 범위: **03단계 (Training)**
-01, 02, 04, 05단계 스키마 변경 없음.
 
 ---
 
-#### 1. log_return 타겟 Deprecated → log_close 롤백
+#### 1. log_return Deprecated → log_close 롤백
 
-**배경:**
-v3.5.0에서 도입한 `log_return` 타겟이 v3.6.0 피처 확장(Scale-invariant features, Macro 통합) 이후
-`log_close` 대비 성능 지표(RMSE, IC)가 지속적으로 열위로 나타났습니다.
-이론적으로 정상(stationary) 시계열인 `log_return`이 유리하나,
-피처 구성과의 상호작용 혹은 스케일 문제 등 현재 원인이 불명확합니다.
-원인 분석 및 개선 완료 전까지 `log_close`로 롤백하고 `log_return`을 deprecated 처리합니다.
+`target_type="log_return"` 사용 시 `DeprecationWarning` 발생.
+기본값: `"log_close"` 복원.
 
-**변경 사항:**
-
-```
-Before (v3.5.0 ~ v3.6.0): target_type = "log_return"  (기본값)
-After  (v3.7.0):           target_type = "log_close"   (기본값, 권장)
-                           target_type = "log_return"   → DeprecationWarning 자동 발생
-```
-
-`"log_return"` 설정 시 발생하는 경고:
-
-```python
-DeprecationWarning: [DEPRECATED v3.7.0] target_type='log_return'은 deprecated 상태입니다.
-피처 확장 이후 log_close 대비 성능이 열위로 확인되어 롤백되었습니다.
-원인 분석 및 개선 완료 전까지 target_type='log_close'를 사용하세요.
-재도입 여부는 향후 버전에서 결정됩니다.
-```
-
-**타겟 컬럼명 복원:**
-
-```
-Before (v3.5.0 ~ v3.6.0): target_log_return_h{n}   (정상 시계열, 현재 deprecated)
-After  (v3.7.0):           target_log_close_h{n}    (v3.4.0과 동일, 현재 권장)
-```
-
-**예측 파일 컬럼 복원:**
-
-```python
-# val_predictions.parquet / test_predictions.parquet 공통 (v3.7.0~)
-columns = [
-    'date', 'ticker', 'fold',
-
-    # 모델 원시 예측 (log_close 모드, v3.7.0~)
-    'pred_target_log_close_h1', ..., 'pred_target_log_close_h5',
-
-    # 정답값
-    'true_target_log_close_h1', ..., 'true_target_log_close_h5',
-]
-```
-
-**03b_train_ensemble.ipynb pred_cols 필터 복원:**
-
-```python
-# Before (v3.5.0 ~ v3.6.0)
-pred_cols = [c for c in df.columns if c.startswith('pred_target_log_return_h')]
-
-# After (v3.7.0)
-pred_cols = [c for c in df.columns if c.startswith('pred_target_log_close_h')]
-```
-
-**config.yaml 변경:**
-
-```yaml
-# Before (v3.5.0 ~ v3.6.0)
-training:
-  target_type: "log_return"
-
-# After (v3.7.0)
-training:
-  target_type: "log_close"   # 롤백. "log_return" 설정 시 DeprecationWarning 발생
-```
-
-**수정된 파일:**
-- 🔧 `src/modeling/trainer.py` — 기본값 `"log_close"` 복원, `"log_return"` 시 `DeprecationWarning`
+타겟 컬럼명: `target_log_return_h{n}` → `target_log_close_h{n}` (복원)
 
 ---
 
-#### 2. Embargo Gap 도입 — 훈련/검증 경계 누수 방지
-
-**배경:**
-타겟이 h5(5일 후)일 때, 검증 구간 직전 5 거래일의 훈련 샘플은 검증 타겟의 미래 날짜와 겹칩니다.
-이 구간을 제거하지 않으면 미묘한 look-ahead bias가 발생합니다.
-
-**설계 원칙 — 검증 윈도우 크기 보존:**
-
-embargo gap은 검증 시작을 미루는 것이 아니라, **훈련 샘플의 끝을 앞당기는 방식**으로 적용합니다.
-검증/테스트 윈도우 크기는 변하지 않습니다.
+#### 2. Embargo Gap 도입
 
 ```
-❌ 잘못된 방식 (검증 윈도우 축소):
-   실제 훈련: [0, E]       검증: [E+G, E+G+V]   ← 검증이 G만큼 밀림
+훈련 샘플 끝을 G일 앞당김 (G = max(horizons), 자동 계산)
+검증/테스트 윈도우 크기는 변화 없음
 
-✅ 올바른 방식 (훈련 샘플 손실, 윈도우 보존):
-   실제 훈련: [0, E-G]     embargo: [E-G, E]
-   검증:      [E, E+V]                           ← 윈도우 크기 변화 없음
-```
-
-**Embargo gap 자동 계산 (`max(horizons)`):**
-
-`embargo_gap_days`는 별도 파라미터나 config 항목이 없습니다.
-`run()` 내부에서 `G = max(self.horizons)`로 자동 계산되므로,
-`horizons`를 변경하면 gap이 자동으로 연동됩니다.
-
-```
-horizons = [1, 2, 3, 4, 5]  →  G = 5 (자동)
-horizons = [1, 2, 3]        →  G = 3 (자동)
-```
-
-**2-Fold 구조 변경 (G = max(horizons)):***
-
-```
-Before (v3.5.0 ~ v3.6.0):
-  [검증 폴드] 훈련: [0, E]       검증: [E, E+V]
-  [테스트 폴드] 훈련: [V, E+V]   테스트: [E+V, E+V+T]
-
-After (v3.7.0):
-  [검증 폴드] 실제 훈련: [0, E-G]    embargo: [E-G, E]    검증: [E, E+V]
-  [테스트 폴드] 실제 훈련: [V, E+V-G] embargo: [E+V-G, E+V] 테스트: [E+V, E+V+T]
-
-E = train_end, V = valid_window_days, T = test_window_days, G = max(horizons)
-```
-
-훈련 샘플 손실(G일)은 01단계 수집 시작일을 앞당겨 보완합니다.
-
-**trainer.run() 시그니처 — 변경 없음:**
-
-```python
-# v3.6.0과 시그니처 동일. 내부에서 G = max(self.horizons) 자동 계산.
-results = trainer.run(
-    df=df,
-    train_end=train_cfg['train_end'],
-    valid_window_days=train_cfg['valid_window_days'],
-    test_window_days=train_cfg['test_window_days'],
-    fit_kwargs=fit_kwargs
-)
-
-# 반환 dict에 신규 키 추가
-results['embargo_gap_days']   # ✨ 적용된 embargo gap (= max(horizons))
+[검증 폴드] 실제 훈련: [0, E-G]    embargo: [E-G, E]    검증: [E, E+V]
+[테스트 폴드] 실제 훈련: [V, E+V-G] embargo: [E+V-G, E+V] 테스트: [E+V, E+V+T]
 ```
 
 **수정된 파일:**
-- 🔧 `src/modeling/trainer.py` — `G = max(self.horizons)` 자동 계산, 날짜 인덱스 슬라이싱 수정
+- 🔧 `src/modeling/trainer.py`
+- 🔧 `config/config.yaml` — `target_type: "log_close"` 복원
 
 ---
 
 ### 호환성 (v3.6.0 → v3.7.0)
 
-**비호환 (재실행 필요):**
-- 03단계 전체 재실행 필수
-  - 타겟 컬럼명: `target_log_return_h{n}` → `target_log_close_h{n}`
-  - 예측 파일 컬럼: `pred_target_log_return_h{n}` → `pred_target_log_close_h{n}`
-  - v3.6.0 모델(.pkl) 키가 `target_log_return_h{n}` → 04단계에서 컬럼 불일치
-- 03b 재실행 필수
-  - `pred_cols` 필터 prefix 복원: `pred_target_log_return_h` → `pred_target_log_close_h`
-
-**호환 (재실행 불필요):**
-- 01단계 Raw 데이터: 변경 없음
-- 02단계 Feature 데이터셋: `target_log_close` 기준 컬럼 유지, 변경 없음
-- 04단계: `pred_log_close`, `pred_close` 컬럼명 유지 (하위 호환)
-- 05단계: 입력 스키마 변경 없음
+**비호환:** 03단계 전체 재실행 필수 (타겟 컬럼명 변경).
+**호환:** 01, 02단계, 04단계 컬럼명 유지, 05단계 입력 스키마 변경 없음.
 
 ---
 
@@ -322,162 +377,32 @@ results['embargo_gap_days']   # ✨ 적용된 embargo gap (= max(horizons))
 
 #### 1. 피처 엔지니어링 개선 — Scale-Invariance
 
-**배경:**
-트리 모델은 절대 가격 스케일에 무관하나, 피처 자체가 가격 수준에 종속되면
-종목 간 비교 시 bias가 발생할 수 있습니다. 주요 피처를 무차원(scale-invariant) 형태로 변환합니다.
+| 이전 | 이후 |
+|---|---|
+| `feature_ma_5`, `feature_ma_60` | `feature_ma_5_disparity`, `feature_ma_60_disparity` |
+| `feature_bb_upper`, `feature_bb_lower` | `feature_bb_pct_b`, `feature_bb_width` |
+| `liquidity_score` | `feature_log_liquidity` |
 
-**변경 피처 (src/features/builder.py):**
+#### 2. 매크로/레짐 피처 통합
 
-| 이전 (v3.5.0) | 이후 (v3.6.0) | 변환 방식 |
-|---|---|---|
-| `feature_ma_5`, `feature_ma_60` (절대 가격) | `feature_disparity_5`, `feature_disparity_60` | `close / ma - 1` (이격도) |
-| `feature_bb_upper`, `feature_bb_lower` (절대 가격) | `feature_bb_pct_b`, `feature_bb_bandwidth` | %B, Bandwidth (무차원) |
-| `liquidity_score` (원화 거래대금) | `feature_log_liquidity` | `log(거래대금)` |
+신규 피처: `feature_kospi`, `feature_usd_krw`, `feature_vix`, `feature_us_return_1d`, `feature_market_regime`
+출처: `data/99_meta/macro_regime.parquet`
 
-**신규 피처:**
+#### 3. IC/ICIR 평가 지표 도입
 
-```python
-# 매크로 피처 (99_meta/macro_regime.parquet에서 조인, feature_ 접두어 자동 부여)
-'feature_kospi'             # KOSPI 지수
-'feature_usd_krw'           # USD/KRW 환율
-'feature_vix'               # VIX 지수 (공포 지수)
-'feature_us_return_1d'      # 직전 거래일 미국 시장 수익률
-'feature_market_regime'     # 시장 레짐 (-1=Bear, 0=Neutral, 1=Bull, 인코딩)
+앙상블 가중치 최적화 목표: MSE → `-IC(Spearman)` 최소화
 
-# 기업 정보 피처
-'feature_is_kospi'          # KOSPI=1 / KOSDAQ=0 (FDR StockListing 기반)
+#### 4. 98단계 신설
 
-# 캘린더 피처
-'feature_is_monday'         # 월요일 여부 (0/1)
-'feature_is_friday'         # 금요일 여부 (0/1)
-```
-
-**제거 피처:**
-- `sector` (범주형 고차원 변수 → 피처 인플레이션 방지 목적으로 제외)
-
-**접두어 규칙 확립:**
-모든 학습 피처에 `feature_` 접두어를 의무화합니다.
-`feature_cols = [c for c in df.columns if c.startswith('feature_')]` 자동 인식.
-
-**수정된 파일:**
-- 🔧 `src/features/builder.py` — Disparity, %B/Bandwidth, log_liquidity 변환, sector 제거
-- 🔧 `02_build_dataset.ipynb` — 매크로 병합, is_kospi 병합, 캘린더 피처 추가
-
----
-
-#### 2. 평가 지표 고도화 — IC / ICIR 도입
-
-**배경:**
-RMSE는 예측값의 절대 오차를 측정하나, 실제 투자에서 중요한 것은 종목 간 상대적 순위 예측력입니다.
-Cross-Sectional IC(Spearman 상관계수)를 주요 지표로 추가합니다.
-
-**지표 정의:**
-
-```
-IC (Information Coefficient):
-  날짜별 전 종목에 걸쳐 예측값과 실제값 간 Spearman 상관계수 계산 후 평균.
-  IC > 0: 예측이 실제 수익률 순위를 올바르게 맞춤.
-  IC > 0.05: 실용적 수준의 예측력.
-
-ICIR (IC Information Ratio):
-  IC_mean / IC_std. 예측 안정성 지표.
-  ICIR > 0.5: 안정적인 알파 신호.
-```
-
-**trainer.py 변경:**
-
-```python
-# Before (v3.5.0): RMSE만 계산
-return {'avg_rmse': ..., 'per_horizon': {'rmse': ...}}
-
-# After (v3.6.0): RMSE + IC + ICIR
-return {
-    'avg_rmse': ...,
-    'avg_ic'  : ...,       # ✨ 신규
-    'per_horizon': {
-        'rmse'   : ...,
-        'ic_mean': ...,    # ✨ 신규
-        'icir'   : ...,    # ✨ 신규
-    }
-}
-```
-
-**03b_train_ensemble.ipynb 앙상블 가중치 최적화 목표 변경:**
-
-```python
-# Before (v3.5.0): RMSE 최소화
-weights = minimize(lambda w: rmse(ensemble_pred(w), true), ...)
-
-# After (v3.6.0): -IC 최소화 (= IC 최대화)
-weights = minimize(lambda w: -ic(ensemble_pred(w), true), ...)
-```
-
-**05단계 평가 지표 변경 (select_universe.py):**
-
-```python
-# Before (v3.5.0): directional_accuracy (방향 정확도)
-accuracy_score = (pred_direction == true_direction).mean()
-
-# After (v3.6.0): Time-series IC (Spearman 상관계수)
-accuracy_score = spearmanr(pred_log_close, true_log_close).correlation
-```
-
-**수정된 파일:**
-- 🔧 `src/modeling/trainer.py` — `_evaluate()` 메서드에 IC/ICIR 계산 추가
-- 🔧 `src/universe/select_universe.py` — `directional_accuracy` → IC 기반 평가
-- 🔧 `03b_train_ensemble.ipynb` — 가중치 최적화 목표 `-IC`로 변경
-
----
-
-#### 3. 전역 메타 데이터 파이프라인 신설 — 98단계
-
-**배경:**
-매크로 경제 지표(KOSPI, 환율, VIX)와 시장 레짐 정보를 전역 메타 데이터로 중앙화합니다.
-외부 데이터 수집을 모두 FinanceDataReader로 전환하여 pykrx 로그인 이슈를 우회합니다.
-
-**신설 파일:**
-- 📄 `98_save_macro_data.ipynb` — 매크로/레짐 데이터 수집 및 저장
-- 📁 `data/99_meta/macro_regime.parquet` — 수집 결과 저장
-
-**매크로 데이터 저장 구조:**
-
-```python
-# data/99_meta/macro_regime.parquet
-columns = [
-    'date',              # 거래일
-    'kospi',             # KOSPI 지수
-    'usd_krw',           # USD/KRW 환율
-    'vix',               # VIX 지수
-    'us_return_1d',      # 직전 거래일 미국 시장 수익률
-    'market_regime',     # 시장 레짐 (-1=Bear, 0=Neutral, 1=Bull)
-]
-# → 02_build_dataset.ipynb에서 조인 후 feature_ 접두어 부여
-```
-
-**폴더 구조 추가:**
-
-```
-data/99_meta/               # ✨ v3.6.0 신설
-  ├── krx_calendar.csv      # 영업일 캘린더 (기존)
-  └── macro_regime.parquet  # ✨ 매크로/레짐 데이터 (신규)
-```
+- 📄 `98_save_macro_data.ipynb`
+- 📁 `data/99_meta/macro_regime.parquet`
 
 ---
 
 ### 호환성 (v3.5.0 → v3.6.0)
 
-**비호환 (재실행 필요):**
-- 02단계 재실행 필수
-  - 피처 컬럼명 변경: `feature_ma_{n}` → `feature_disparity_{n}`, `feature_bb_*` → `feature_bb_pct_b/bandwidth`
-  - 신규 컬럼: `feature_log_liquidity`, `feature_is_kospi`, `feature_is_monday/friday`, `feature_kospi`, `feature_usd_krw` 등
-  - 제거 컬럼: `sector`, `feature_ma_5/60`, `feature_bb_upper/lower`, `liquidity_score`
-- 03단계 재실행 필수 (피처 컬럼 변경에 따른 모델 재학습)
-- 98단계 선행 실행 필요 (`macro_regime.parquet` 미존재 시 02단계 경고 출력 후 매크로 피처 제외)
-
-**호환 (재실행 불필요):**
-- 01단계 Raw 데이터: 변경 없음
-- 04단계: 예측 파일 구조 변경 없음
-- 05단계: `pred_log_close` 컬럼 유지
+**비호환:** 02, 03단계 전체 재실행 필수. 98단계 선행 실행 필요.
+**호환:** 01단계, 04단계 예측 파일 구조, 05단계 입력 스키마 변경 없음.
 
 ---
 
@@ -485,83 +410,13 @@ data/99_meta/               # ✨ v3.6.0 신설
 
 ### 🟢 MINOR Changes - Training Pipeline Improvement
 
-변경 범위: **03단계 (Training), 04단계 (Forecasts)**
-02단계 및 05단계 스키마 변경 없음.
+변경 범위: **03단계 (Training)**
 
----
-
-#### 1. 검증/테스트 분리 — 2-Fold Walk-Forward 구조
-
-**배경:**
-기존 `num_valid=3` 구조에서 검증 폴드(Fold 0~1)의 예측값이 버려지고, 앙상블 가중치 최적화가 테스트셋(Fold 2)으로 수행되어 데이터 누수가 발생하고 있었습니다.
-
-**변경 사항:**
-
-`num_valid` 파라미터 제거 → 2-Fold 고정 구조 채택
-
-```
-Before (v3.4.0, num_valid=3):
-  Fold 0 (Valid-1): train [0,E],   eval [E, E+V]   → 예측값 버림
-  Fold 1 (Valid-2): train [V,E+V], eval [E+V,E+2V] → 예측값 버림
-  Fold 2 (TEST)   : train [2V,E+2V], eval [E+2V,E+3V]
-                    → predictions.parquet (단일 파일)
-                    → 앙상블 가중치 최적화 입력 (테스트셋 누수)
-
-After (v3.5.0):
-  [검증 폴드]: train [0, E],   valid [E, E+V]
-               → val_predictions.parquet (앙상블 가중치용)
-               → Early stopping 기준
-  [테스트 폴드]: train [V, E+V], test [E+V, E+V+T]
-                → test_predictions.parquet (최종 평가 전용)
-                → final_model
-```
-
-**파일 구조 변경:**
-
-```
-# Before (v3.4.0)
-data/03_training/{date}/{model_name}/
-  └── predictions.parquet
-
-# After (v3.5.0)
-data/03_training/{date}/{model_name}/
-  ├── val_predictions.parquet      # 검증 폴드 (앙상블 가중치 최적화 입력)
-  └── test_predictions.parquet     # 테스트 폴드 (최종 평가 전용)
-```
-
-**설정 변경 (config.yaml):**
-
-```yaml
-# Before (v3.4.0)
-training:
-  num_valid: 3
-
-# After (v3.5.0)
-training:
-  valid_window_days: 60
-  test_window_days: 60
-```
+2-Fold Walk-Forward 구조 도입. `val_predictions.parquet` + `test_predictions.parquet` 분리.
+앙상블 가중치 최적화를 테스트셋이 아닌 검증셋 기반으로 수행하여 데이터 누수 제거.
 
 **수정된 파일:**
-- 🔧 `src/modeling/trainer.py` — 2-Fold 고정 구조, `val_predictions` 저장 추가
-- 🔧 `03_train_predict.ipynb` — 저장 셀: 파일 2개 분리
-- 🔧 `03b_train_ensemble.ipynb` — 가중치 최적화 입력 교체
-- 🔧 `config/config.yaml` — `num_valid` 제거
-
----
-
-#### 2. log_return 타겟 전환 (→ v3.7.0에서 deprecated 처리)
-
-**배경:**
-`target_log_close`가 비정상(non-stationary) 시계열이라는 이론적 우려로 `log_return`으로 전환.
-이후 v3.6.0 피처 확장 후 성능 열위가 확인되어 v3.7.0에서 롤백됨.
-
-**타겟 컬럼명:**
-
-```
-Before (v3.4.0): target_log_close_h{n}
-After  (v3.5.0): target_log_return_h{n}   ← v3.7.0에서 deprecated
-```
+- 🔧 `src/modeling/trainer.py`, `03_train_predict.ipynb`, `03b_train_ensemble.ipynb`, `config/config.yaml`
 
 ---
 
@@ -576,48 +431,10 @@ After  (v3.5.0): target_log_return_h{n}   ← v3.7.0에서 deprecated
 
 ### 🟢 MINOR Changes - Model Diversification
 
-모델 다양화 (RandomForest + Ensemble)
+RandomForest 멀티아웃풋 모델 추가. 앙상블 학습 단계(`03b_train_ensemble.ipynb`) 도입.
+모델별 폴더 계층 추가: `03_training/{date}/{model_name}/`.
 
-**변경 사항:**
-- RandomForest 멀티아웃풋 모델 추가
-- 앙상블 학습 단계(03b_train_ensemble.ipynb) 도입
-- 모델별 폴더 계층 추가: `03_training/{date}/{model_name}/`
-- config: `active_model` 옵션 추가
-
-**신규 추가 파일:**
-- `src/models/randomforest_model.py` — RandomForestMultiModel
-- `src/models/ensemble_model.py` — EnsembleModel
-- `03b_train_ensemble.ipynb` — OOF 기반 최적 가중치 탐색
-
-**폴더 구조 변경:**
-
-```
-# Before (v3.3.0)
-data/03_training/{YYYYMMDD}/
-  ├── *.pkl
-  ├── registry.json
-  └── predictions.parquet
-
-# After (v3.4.0)
-data/03_training/{YYYYMMDD}/
-  ├── lightgbm/   { *.pkl, registry.json, predictions.parquet }
-  ├── randomforest/ { ... }
-  └── ensemble/   { ... }
-```
-
-**설정 변경 (config.yaml):**
-
-```yaml
-randomforest_params: { n_estimators: 40, max_depth: 8, ... }
-active_model: "ensemble"   # 'lightgbm' | 'randomforest' | 'ensemble'
-```
-
-**수정된 파일:** `src/models/base.py`, `src/models/artifact.py`, `src/utils/config.py`,
-`03_train_predict.ipynb`, `04_forecast_future.ipynb`, `config/config.yaml`
-
-**호환성:**
-- ✅ v3.3.0 LightGBM 모델 자동 호환
-- ❌ v3.4.0 모델은 v3.3.0 코드에서 로드 불가
+**신규 파일:** `src/models/randomforest_model.py`, `src/models/ensemble_model.py`, `03b_train_ensemble.ipynb`
 
 ---
 
@@ -625,26 +442,9 @@ active_model: "ensemble"   # 'lightgbm' | 'randomforest' | 'ensemble'
 
 ### 🟢 MINOR Changes - Infrastructure Modernization
 
-**H1 - 데이터 폴더 구조 개선:**
-
-```
-# Before (v3.2.x)
-data/03_results/{YYYYMMDD}/
-  ├── predictions.parquet
-  ├── *.pkl
-  ├── forecasts/future_forecasts.parquet
-  └── universe/investment_report.xlsx
-
-# After (v3.3.0)
-data/
-  ├── 03_training/{YYYYMMDD}/
-  ├── 04_forecasts/{YYYYMMDD}/
-  └── 05_universe/{YYYYMMDD}/
-```
-
-**H2 - ProjectPaths 클래스 도입:** `src/utils/config.py`에 추가. 모든 노트북 경로 관리 통일.
-
-**H3 - select_universe.py 모듈 정리:** Facade Pattern 적용, 단일 진입점 함수화.
+H1: 단계별 독립 폴더 구조 (`03_training/`, `04_forecasts/`, `05_universe/`).
+H2: `ProjectPaths` 클래스 도입 — 경로 관리 중앙화.
+H3: `select_universe.py` Facade Pattern 적용.
 
 ---
 
@@ -652,48 +452,31 @@ data/
 
 ### 🔵 PATCH Changes
 
-**1. Multi-Horizon Walk-Forward 버그 수정:** Horizon별 dropna 후 길이 불일치 → 교집합 인덱스 사용.
-
-**2. Recursive Extension Chunk 오염 방지:** Chunk 1+ 예측 시 volume → 최근 20일 평균으로 대체.
+Multi-Horizon Walk-Forward 버그 수정. Chunk 오염 방지 (volume → 최근 20일 평균).
 
 ---
 
 ## [3.2.0] - 2026-02-07
 
-### 🟢 MINOR Changes - Multi-Stage Pipeline
-
-- 04단계 추가: Recursive Extension 미래 예측
-- 05단계 추가: 3대 평가 지표 기반 유니버스 선정
-
----
-
-## [3.1.1] - 2026-01-21
-
-### 🔵 PATCH Changes
-
-Target 생성 위치 재변경: 03단계 → 02단계 (모든 모델이 동일 Target 공유)
-
----
-
-## [3.1.0] - 2026-01-21
-
 ### 🟢 MINOR Changes
 
-Multi-Horizon Direct Forecasting (h1~h5) 도입. Target-Centric Alignment.
+04단계 (Recursive Extension 미래 예측), 05단계 (유니버스 선정) 추가.
+
+---
+
+## [3.1.1] - 2026-01-21 / [3.1.0] - 2026-01-21
+
+Target 생성 위치 재변경 (03 → 02). Multi-Horizon Direct Forecasting (h1~h5) 도입.
 
 ---
 
 ## [3.0.0] - 2026-01-18
 
-### 🔴 MAJOR Changes
-
-Target 생성 위치 변경: 01_raw → 02_processed. Feature와의 시간 정렬 명확화.
+Target 생성 위치 변경 (01_raw → 02_processed).
 
 ---
 
 ## [2.0.0] - 2024-12-28
-
-### 🔴 MAJOR Changes
 
 Feature Prefix 통일: `ma_5` → `feature_ma_5`.
 
@@ -705,7 +488,27 @@ Initial Release. Step 1~3 (수집 → Feature → LightGBM 학습).
 
 ---
 
-**Last Updated**: 2026-02-24
-**Schema Version**: 3.7.1
+### 버전별 변경 이력
+
+| Version | Date | Type | 주요 변경 사항 |
+|---------|------|------|----------------|
+| **3.8.0** | 2026-02-28 | 🟢 MINOR | MLP 모델 도입 + 앙상블 조합 동적 지정 + 04단계 건너뜀 처리 |
+| **3.7.2** | 2026-02-25 | 🔵 PATCH | 비현실적 수익률 필터링 (max_daily_return) |
+| **3.7.1** | 2026-02-24 | 🔵 PATCH | 04단계 피처 스키마 동기화 + 97단계 신설 |
+| **3.7.0** | 2026-02-22 | 🟢 MINOR | log_close 롤백 + Embargo Gap |
+| **3.6.0** | 2026-02-21 | 🟢 MINOR | Scale-invariant 피처 + IC 평가 + 매크로 통합 |
+| **3.5.0** | 2026-02-20 | 🟢 MINOR | 2-Fold 구조 + log_return 타겟 (현재 deprecated) |
+| **3.4.0** | 2026-02-17 | 🟢 MINOR | RF 모델 + 앙상블 학습 |
+| **3.3.0** | 2026-02-09 | 🟢 MINOR | 폴더 구조 개선 + 경로 중앙화 |
+| **3.2.1** | 2026-02-09 | 🔵 PATCH | Multi-Horizon 버그 + Chunk 오염 방지 |
+| **3.2.0** | 2026-02-07 | 🟢 MINOR | 04단계(미래예측) + 05단계(유니버스) |
+| 3.1.1 | 2026-01-21 | 🔵 PATCH | Target 생성 위치 재변경 |
+| 3.1.0 | 2026-01-21 | 🟢 MINOR | Multi-horizon 예측 |
+| 3.0.0 | 2026-01-18 | 🔴 MAJOR | Target 위치 변경 |
+
+---
+
+**Last Updated**: 2026-02-28
+**Schema Version**: 3.8.0
 **Status**: ✅ Stable
 **Maintained by**: SignalWeaver Team
