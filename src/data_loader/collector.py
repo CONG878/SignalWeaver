@@ -31,19 +31,46 @@ except ImportError:
 
 def get_ticker_universe(reference_date: str) -> List[Tuple[str, str]]:
     """
-    KRX 전체 종목 리스트 조회
+    KRX 전체 종목 리스트 조회 (FDR 실패 시 로컬 파일 Fallback 적용)
     """
     print(f"🔍 KRX 전체 종목 조회 중 (기준일: {reference_date})...")
+    
+    # 1. 기본 시도: FinanceDataReader
     try:
         all_stocks = fdr.StockListing('KRX')
-        ticker_list = list(zip(
-            all_stocks['Code'].values,
-            all_stocks['Name'].values
-        ))
-        print(f"✅ 총 {len(ticker_list)}개 종목 조회 완료")
+        # FDR 결과에서도 만약을 대비해 'Code'를 6자리로 정렬하여 반환
+        ticker_list = [
+            (str(code).zfill(6), str(name)) 
+            for code, name in zip(all_stocks['Code'], all_stocks['Name'])
+        ]
+        print(f"✅ FDR을 통해 {len(ticker_list)}개 종목 조회 완료")
         return ticker_list
+
     except Exception as e:
-        raise RuntimeError(f"종목 리스트 조회 실패: {e}")
+        print(f"⚠️ FDR 조회 실패 (오류: {e}).")
+        fallback_path = Path(f"data/01_raw/{reference_date}/stock_list.csv")
+        
+        if fallback_path.exists():
+            try:
+                # 2. Fallback: 로컬 CSV 파일 (헤더는 이미 영문 'Code', 'Name'으로 맞춰진 상태 가정)
+                df_fallback = pd.read_csv(fallback_path)
+                
+                # 데이터 타입 보존 및 6자리 패딩 (005930 유지)
+                # 이미 6자리라면 변화가 없고, 숫자로 읽혀 5자리가 된 경우 앞을 0으로 채움
+                ticker_list = [
+                    (str(code).zfill(6), str(name))
+                    for code, name in zip(df_fallback['Code'], df_fallback['Name'])
+                ]
+                
+                print(f"✅ 로컬 파일에서 {len(ticker_list)}개 종목 로드 완료 (6자리 패딩 적용)")
+                return ticker_list
+            
+            except Exception as fe:
+                print(f"❌ 로컬 파일 로드 중 오류 발생: {fe}")
+        else:
+            print(f"❌ 로컬 파일이 존재하지 않습니다: {fallback_path}")
+        
+        raise e
 
 
 class RawPriceCollector:
