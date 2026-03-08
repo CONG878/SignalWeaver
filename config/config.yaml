@@ -1,12 +1,12 @@
 # SignalWeaver 프로젝트 공통 설정
 project:
   name: "SignalWeaver"
-  reference_date: "20260227"
+  reference_date: "20260307"
 
 # 01_collect_data 관련 설정
 data_collection:
-  start_date: "20230519"
-  end_date: "20260227"
+  start_date: "20230710"
+  end_date: "20260306"
   save_csv: True
   save_parquet: True
   min_sleep: 0.05
@@ -25,7 +25,7 @@ preprocessing:
 training:
   # 검증 폴드 훈련 종료일
   # 테스트 폴드 훈련 종료일 = train_end + valid_window_days 거래일
-  train_end: "2025-08-21"
+  train_end: "2025-10-15"
 
   # ✨ v3.7.0: Embargo Gap
   # embargo_gap_days는 max(horizons)로 자동 계산됩니다 — 별도 설정 불필요.
@@ -33,20 +33,24 @@ training:
 
   # 검증 윈도우 크기 (거래일)
   # 동시에 테스트 폴드의 훈련 구간 롤링 offset으로 사용됨
-  valid_window_days: 60
+  valid_window_days: 45
 
   # 테스트 윈도우 크기 (거래일)
-  test_window_days: 60
+  test_window_days: 45
 
   # 02단계에서 생성된 기준 타겟 컬럼 (log_close 값을 담고 있어야 함)
-  target_col_name: "target_log_close"
+  # log_close 모드에서만 사용됨 (log_return_1d 모드는 직접 컬럼 참조)
+  target_col_name: "target_log_return_1d" # "target_log_close" || "target_log_return_1d"
 
   # 타겟 타입
-  # "log_close"  : target_log_close_h{n} = log_close(t+n)  [기본값, 권장]
-  # "log_return" : target_log_return_h{n} = log_close(t+n) - log_close(t)
-  #                ⚠️ DEPRECATED v3.6.0: 피처 확장 후 log_close 대비 성능 열위.
-  #                   원인 분석 완료 전까지 사용 금지.
-  target_type: "log_close"
+  # "log_close"    : target_log_close_h{n}(t) = log(close(t+n))       [기본값, 권장]
+  # "log_return_1d" : target_log_return_1d_h{n}(t) = log1p(change_pct(t+n))
+  #                  = log(close(t+n)) - log(close(t+n-1))
+  #                  ✨ v3.9.0 신규: 당일 등락률 기반, raw change_pct 직접 사용
+  #
+  # [REMOVED v3.9.0]
+  # "log_return" : log_close(t+n) - log_close(t) 방식, 성능 열위로 완전 제거
+  target_type: "log_return_1d" # "log_close" || "log_return_1d"
 
   # 예측하고자 하는 시차(영업일) 리스트
   horizons: [1, 2, 3, 4, 5]
@@ -68,32 +72,32 @@ training:
   # RandomForest 전용 파라미터
   randomforest_params:
     n_estimators: 40
-    max_depth: 16
-    min_samples_split: 150
-    min_samples_leaf: 75
+    max_depth: 18
+    min_samples_split: 80
+    min_samples_leaf: 40
     n_jobs: -1
     random_state: 42
-    max_samples: 0.5
+    max_samples: 0.6
 
   # MLP 전용 파라미터
   mlp_params:
-    hidden_dims: [128, 64, 32, 32, 16]
-    dropout_rates: [0.2, 0.2, 0.1, 0.0, 0.0]
+    hidden_dims: [64, 32, 16]
+    dropout_rates: [0.2, 0.0, 0.0]
     learning_rate: 0.001
-    batch_size: 2048
+    batch_size: 512
     epochs: 200
     patience: 15
     weight_decay: 0.0001
 
 # 05_universe_selection 관련설정
 universe:
-  model_date: "20260226"
+  model_date: "20260307"
 
 # 모델 선택: 단일 모델 OR 앙상블
 # 3모델 이상 확장에 따라 'ensemble' 제외
 # 단일 모델: 'lightgbm' | 'randomforest' | 'mlp'
 # 앙상블: 'mlp+lgbm' | 'lgbm+rf' | 'rf+mlp' | 'mlp+lgbm+rf'
-active_model: "mlp+lgbm+rf"
+active_model: "mlp"
 
 # 전략 및 운용 관련 설정
 strategy:
@@ -114,6 +118,6 @@ paths:
 
 # 캘린더 설정
 calendar:
-  start_date: "2026-03-03"
-  end_date: "2026-05-27"
+  start_date: "2026-03-09"
+  end_date: "2026-05-12"
   prefer_mcal: True

@@ -1,9 +1,9 @@
 # src/modeling/trainer.py
-# v3.7.0 변경사항:
-#   1. target_type="log_return" → DeprecationWarning 추가, 기본값 "log_close"로 롤백
-#   2. Embargo gap 도입 (run 메서드)
-#      → G = max(self.horizons) 자동 계산 (별도 파라미터 없음)
-#      → val/test 훈련 샘플 끝을 G만큼 앞당기고, eval 윈도우는 그대로 유지
+# v3.9.0 변경사항:
+#   1. target_type="log_return" → 정식 폐기 (ValueError로 즉시 차단)
+#   2. target_type="log_return_1d" 신규 추가
+#      → target_log_return_1d_h{n}(t) = np.log1p(change_pct(t+n))
+#      → 02단계에서 np.log1p(df['change_pct'])로 직접 생성된 컬럼을 shift(-n)
 
 from __future__ import annotations
 import warnings
@@ -13,6 +13,9 @@ import numpy as np
 from src.models.base import ModelBase
 import copy
 import scipy.stats as stats
+
+
+_VALID_TARGET_TYPES = ("log_close", "log_return_1d")
 
 
 class WalkForwardTrainer:
@@ -33,28 +36,30 @@ class WalkForwardTrainer:
         -------
         target_col_name : str
             02단계 dataset의 기준 타겟 컬럼명.
-            (기본값: "target_log_close")
+            - log_close    모드: "target_log_close"    (기본값)
+            - log_return_1d 모드: "target_log_return_1d"
+
         target_type : str
-            "log_close"  : target_log_close_h{n}(t) = log_close(t+n)          [기본값, 권장]
-            "log_return" : target_log_return_h{n}(t) = log_close(t+n) - log_close(t)
-                           ⚠️ DEPRECATED (v3.7.0): 피처 확장 후 log_close 대비 성능 열위.
-                           원인 분석 및 개선 완료 전까지 log_close를 사용하세요.
+            "log_close"     : target_log_close_h{n}(t)     = log(close(t+n))     [기본값, 권장]
+            "log_return_1d" : target_log_return_1d_h{n}(t) = log1p(change_pct(t+n))
+                              당일 등락률의 로그값. shift(-n)으로 t+n 시점의 값을 사용.
+                              역산: close(t+h) = close(t) × exp(Σ pred_h{i}, i=1..h)
+
+            ❌ "log_return"  : v3.9.0에서 정식 폐기. 사용 불가.
         """
-        if target_type not in ("log_return", "log_close"):
+        # log_return 정식 폐기 — ValueError로 즉시 차단
+        if target_type == "log_return":
             raise ValueError(
-                f"target_type은 'log_return' 또는 'log_close'이어야 합니다. "
-                f"받은 값: '{target_type}'"
+                "[REMOVED v3.9.0] target_type='log_return'은 정식 폐기되었습니다. "
+                "'log_return_1d' (당일 등락률 기반) 또는 'log_close'를 사용하세요.\n"
+                "  log_close     : target_log_close_h{n}(t) = log(close(t+n))\n"
+                "  log_return_1d : target_log_return_1d_h{n}(t) = log1p(change_pct(t+n))"
             )
 
-        # ⚠️ v3.7.0: log_return deprecated
-        if target_type == "log_return":
-            warnings.warn(
-                "[DEPRECATED v3.7.0] target_type='log_return'은 deprecated 상태입니다. "
-                "피처 확장 이후 log_close 대비 성능이 열위로 확인되어 롤백되었습니다. "
-                "원인 분석 및 개선 완료 전까지 target_type='log_close'를 사용하세요. "
-                "재도입 여부는 향후 버전에서 결정됩니다.",
-                DeprecationWarning,
-                stacklevel=2
+        if target_type not in _VALID_TARGET_TYPES:
+            raise ValueError(
+                f"target_type은 {_VALID_TARGET_TYPES} 중 하나여야 합니다. "
+                f"받은 값: '{target_type}'"
             )
 
         self.model = model
@@ -94,8 +99,6 @@ class WalkForwardTrainer:
 
         E = train_end, V = valid_window_days, T = test_window_days, G = max(horizons)
 
-        ※ 훈련 샘플 손실(G일)은 01단계에서 수집 기간을 앞당겨 보완합니다.
-
         반환
         ----
         dict with keys:
@@ -119,7 +122,9 @@ class WalkForwardTrainer:
         if self.target_col_name not in df_run.columns:
             raise KeyError(
                 f"'{self.target_col_name}' 컬럼이 데이터에 없습니다. "
-                f"02단계에서 target_log_close 컬럼이 생성됐는지 확인하세요."
+                f"02단계에서 해당 타겟 컬럼이 생성됐는지 확인하세요.\n"
+                f"  log_close     모드: target_log_close\n"
+                f"  log_return_1d 모드: target_log_return_1d"
             )
 
         target_cols = self._build_target_cols(df_run)
@@ -137,13 +142,13 @@ class WalkForwardTrainer:
 
         # 검증 폴드
         val_train_start_idx = 0
-        val_train_end_idx   = train_end_idx - G      # ← 실제 학습 샘플 끝 (embargo 적용)
-        val_eval_start_idx  = train_end_idx           # ← 검증 시작 (embargo gap 이후)
+        val_train_end_idx   = train_end_idx - G
+        val_eval_start_idx  = train_end_idx
         val_eval_end_idx    = train_end_idx + valid_window_days
 
         # 테스트 폴드 (훈련 구간을 valid_window_days만큼 롤링)
         test_train_start_idx = valid_window_days
-        test_train_end_idx   = train_end_idx + valid_window_days - G  # ← embargo 적용
+        test_train_end_idx   = train_end_idx + valid_window_days - G
         test_eval_start_idx  = train_end_idx + valid_window_days
         test_eval_end_idx    = test_eval_start_idx + test_window_days
 
@@ -166,9 +171,9 @@ class WalkForwardTrainer:
         # 3. 날짜 배열 추출 및 기간 출력
         # ──────────────────────────────────────────
         val_train_dates  = all_dates[val_train_start_idx : val_train_end_idx]
-        val_eval_dates   = all_dates[val_eval_start_idx  : val_eval_end_idx]   # ← 분리됨
+        val_eval_dates   = all_dates[val_eval_start_idx  : val_eval_end_idx]
         test_train_dates = all_dates[test_train_start_idx : test_train_end_idx]
-        test_eval_dates  = all_dates[test_eval_start_idx  : test_eval_end_idx]  # ← 분리됨
+        test_eval_dates  = all_dates[test_eval_start_idx  : test_eval_end_idx]
 
         print(f"🚀 Walk-Forward Training (2-Fold)")
         print(f"   Target  : {self.target_col_name}  |  "
@@ -192,7 +197,12 @@ class WalkForwardTrainer:
         # ──────────────────────────────────────────
         # 4. 공통 전처리: 필요한 컬럼만 추출
         # ──────────────────────────────────────────
-        cols_needed = [self.date_col, 'ticker'] + self.feature_cols + target_cols
+        # log_return_1d 모드: 보고 지표(RMSE/IC)를 로그 종가 스케일로 통일하기 위해
+        # target_log_close를 평가용 기준값으로 함께 전달
+        _ref_col = 'target_log_close'
+        _extra   = [_ref_col] if (self.target_type == "log_return_1d"
+                                  and _ref_col in df_run.columns) else []
+        cols_needed = [self.date_col, 'ticker'] + self.feature_cols + target_cols + _extra
         temp_df = df_run[cols_needed].copy()
 
         # ══════════════════════════════════════════
@@ -219,7 +229,8 @@ class WalkForwardTrainer:
         full_val_slice = temp_df[temp_df[self.date_col].isin(val_eval_dates)]
         val_predictions = self._predict_with_metadata(full_val_slice, target_cols, fold='valid')
 
-        print(f"   ✅ 검증 Avg RMSE: {valid_metrics['avg_rmse']:.6f}  "
+        print(f"   ✅ 검증 RMS RMSE: {valid_metrics['rms_rmse']:.6f}  "
+              f"| Avg RMSE: {valid_metrics['avg_rmse']:.6f}  "
               f"| Avg IC: {valid_metrics['avg_ic']:.4f}  "
               f"(samples: {valid_metrics['samples']:,})")
 
@@ -228,7 +239,6 @@ class WalkForwardTrainer:
         # ══════════════════════════════════════════
         print(f"\n[테스트 폴드] 학습 중...")
 
-        # 검증 폴드 가중치와 독립된 새 모델로 재학습
         test_model = copy.deepcopy(self.model)
         test_model.is_fitted = False
 
@@ -247,15 +257,15 @@ class WalkForwardTrainer:
             **fit_kwargs
         )
 
-        # test_model로 평가 수행 (self.model 임시 교체)
         _prev_model = self.model
         self.model = test_model
         test_metrics = self._evaluate(test_eval_df, target_cols)
         full_test_slice = temp_df[temp_df[self.date_col].isin(test_eval_dates)]
         test_predictions = self._predict_with_metadata(full_test_slice, target_cols, fold='test')
-        self.model = _prev_model  # 원복
+        self.model = _prev_model
 
-        print(f"   ✅ 테스트 Avg RMSE: {test_metrics['avg_rmse']:.6f}  "
+        print(f"   ✅ 테스트 RMS RMSE: {test_metrics['rms_rmse']:.6f}  "
+              f"| Avg RMSE: {test_metrics['avg_rmse']:.6f}  "
               f"| Avg IC: {test_metrics['avg_ic']:.4f}  "
               f"(samples: {test_metrics['samples']:,})")
 
@@ -279,23 +289,20 @@ class WalkForwardTrainer:
         target_type에 따라 horizon별 타겟 컬럼을 df_run에 인플레이스로 추가하고
         컬럼명 리스트를 반환.
 
-        log_close 모드 (기본값, v3.7.0~):
-            target_log_close_h{n}(t) = log_close(t+n)
+        log_close 모드 (기본값):
+            target_log_close_h{n}(t) = log(close(t+n))
 
-        log_return 모드 (DEPRECATED v3.7.0):
-            prefix = "target_log_return"
-            target_log_return_h{n}(t) = log_close(t+n) - log_close(t)
+        log_return_1d 모드 (v3.9.0 신규):
+            target_log_return_1d_h{n}(t) = log1p(change_pct(t+n))
+            = t+n 시점의 당일 등락률 로그값 (shift(-n) 적용)
+            원본 컬럼: 02단계에서 np.log1p(df['change_pct'])로 생성된 target_log_return_1d
         """
         target_cols = []
 
-        if self.target_type == "log_return":
-            # "target_log_close" → "target_log_return"
-            prefix = self.target_col_name.replace("log_close", "log_return")
-
+        if self.target_type == "log_return_1d":
             for h in self.horizons:
-                col_name = f"{prefix}_h{h}"
-                future_log_close = df_run.groupby('ticker')[self.target_col_name].shift(-h)
-                df_run[col_name] = future_log_close - df_run[self.target_col_name]
+                col_name = f"target_log_return_1d_h{h}"
+                df_run[col_name] = df_run.groupby('ticker')[self.target_col_name].shift(-h)
                 target_cols.append(col_name)
 
         else:  # log_close (기본값, 권장)
@@ -311,7 +318,14 @@ class WalkForwardTrainer:
     # ──────────────────────────────────────────────────────────────
 
     def _evaluate(self, eval_df: pd.DataFrame, target_cols: List[str]) -> Dict[str, float]:
-        """Horizon별 RMSE, IC, ICIR 및 평균 지표 계산"""
+        """Horizon별 RMSE, IC, ICIR 및 평균 지표 계산
+
+        log_return_1d 모드:
+            모델 내부 학습/조기종료는 로그 등락률 스케일로 진행되지만,
+            보고 지표(RMSE/IC)는 로그 종가 스케일로 환산하여 산출.
+            → close(t+h) 복원: log_close(t) + Σ pred_h{i}, i=1..h  (cumsum)
+            → 기준값 log_close(t): eval_df의 'target_log_close' 컬럼 사용
+        """
         if eval_df.empty:
             return {'avg_rmse': np.nan, 'avg_ic': np.nan, 'per_horizon': {}, 'samples': 0}
 
@@ -324,15 +338,25 @@ class WalkForwardTrainer:
             temp_eval[f'pred_{col}'] = preds_df[col].values
             temp_eval[f'true_{col}'] = eval_df[col].values
 
+        # ── log_return_1d: 로그 종가 스케일로 변환 ────────────────
+        if self.target_type == "log_return_1d" and 'target_log_close' in eval_df.columns:
+            log_close_base = eval_df['target_log_close'].values
+            sorted_cols = sorted(target_cols, key=lambda c: int(c.split('_h')[-1]))
+
+            for idx, col in enumerate(sorted_cols):
+                cum_pred = sum(temp_eval[f'pred_{c}'].values for c in sorted_cols[:idx + 1])
+                cum_true = sum(temp_eval[f'true_{c}'].values for c in sorted_cols[:idx + 1])
+                temp_eval[f'pred_{col}'] = log_close_base + cum_pred
+                temp_eval[f'true_{col}'] = log_close_base + cum_true
+        # ─────────────────────────────────────────────────────────
+
         per_horizon = {}
         for col in target_cols:
-            # 1. RMSE
             y_true = temp_eval[f'true_{col}'].values
             y_pred = temp_eval[f'pred_{col}'].values
             mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
             rmse = np.sqrt(np.mean((y_true[mask] - y_pred[mask]) ** 2)) if mask.any() else np.nan
 
-            # 2. Daily Cross-Sectional IC
             daily_ics = []
             for date, group in temp_eval.groupby(self.date_col):
                 if len(group) > 1:
@@ -358,6 +382,7 @@ class WalkForwardTrainer:
         valid_ics   = [v['ic_mean'] for v in per_horizon.values() if not np.isnan(v['ic_mean'])]
 
         return {
+            'rms_rmse'    : float(np.sqrt(np.mean(np.square(valid_rmses)))) if valid_rmses else np.nan,
             'avg_rmse'    : float(np.mean(valid_rmses)) if valid_rmses else np.nan,
             'avg_ic'      : float(np.mean(valid_ics))   if valid_ics   else np.nan,
             'per_horizon' : per_horizon,

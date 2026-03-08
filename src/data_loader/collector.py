@@ -11,6 +11,9 @@ Design Principles:
 
 ✨ H1+H2 패치 (2026-02-08):
     - ProjectPaths 클래스 사용으로 경로 관리 중앙화
+
+✨ Fallback 패치:
+    - get_ticker_universe(): FDR 실패 시 data/01_raw/{ref_date}/stock_list.csv 로 대체
 """
 
 import time
@@ -31,16 +34,24 @@ except ImportError:
 
 def get_ticker_universe(reference_date: str) -> List[Tuple[str, str]]:
     """
-    KRX 전체 종목 리스트 조회 (FDR 실패 시 로컬 파일 Fallback 적용)
+    KRX 전체 종목 리스트 조회.
+
+    Fallback 우선순위:
+      1. fdr.StockListing('KRX')  — API 정상 시
+      2. data/01_raw/{reference_date}/stock_list.csv  — API 실패 시
+
+    Returns
+    -------
+    List[Tuple[str, str]]
+        (ticker_6digit, name) 튜플 리스트
     """
     print(f"🔍 KRX 전체 종목 조회 중 (기준일: {reference_date})...")
-    
-    # 1. 기본 시도: FinanceDataReader
+
+    # ── 1순위: FDR API ────────────────────────────────────────────────────
     try:
         all_stocks = fdr.StockListing('KRX')
-        # FDR 결과에서도 만약을 대비해 'Code'를 6자리로 정렬하여 반환
         ticker_list = [
-            (str(code).zfill(6), str(name)) 
+            (str(code).zfill(6), str(name))
             for code, name in zip(all_stocks['Code'], all_stocks['Name'])
         ]
         print(f"✅ FDR을 통해 {len(ticker_list)}개 종목 조회 완료")
@@ -48,35 +59,33 @@ def get_ticker_universe(reference_date: str) -> List[Tuple[str, str]]:
 
     except Exception as e:
         print(f"⚠️ FDR 조회 실패 (오류: {e}).")
-        fallback_path = Path(f"data/01_raw/{reference_date}/stock_list.csv")
-        
-        if fallback_path.exists():
-            try:
-                # 2. Fallback: 로컬 CSV 파일 (헤더는 이미 영문 'Code', 'Name'으로 맞춰진 상태 가정)
-                df_fallback = pd.read_csv(fallback_path)
-                
-                # 데이터 타입 보존 및 6자리 패딩 (005930 유지)
-                # 이미 6자리라면 변화가 없고, 숫자로 읽혀 5자리가 된 경우 앞을 0으로 채움
-                ticker_list = [
-                    (str(code).zfill(6), str(name))
-                    for code, name in zip(df_fallback['Code'], df_fallback['Name'])
-                ]
-                
-                print(f"✅ 로컬 파일에서 {len(ticker_list)}개 종목 로드 완료 (6자리 패딩 적용)")
-                return ticker_list
-            
-            except Exception as fe:
-                print(f"❌ 로컬 파일 로드 중 오류 발생: {fe}")
-        else:
-            print(f"❌ 로컬 파일이 존재하지 않습니다: {fallback_path}")
-        
-        raise e
+
+    # ── 2순위: 로컬 CSV Fallback ──────────────────────────────────────────
+    fallback_path = Path(f"data/01_raw/{reference_date}/stock_list.csv")
+
+    if fallback_path.exists():
+        try:
+            df_fallback = pd.read_csv(fallback_path)
+            ticker_list = [
+                (str(code).zfill(6), str(name))
+                for code, name in zip(df_fallback['Code'], df_fallback['Name'])
+            ]
+            print(f"✅ 로컬 파일에서 {len(ticker_list)}개 종목 로드 완료 (6자리 패딩 적용)")
+            return ticker_list
+        except Exception as fe:
+            print(f"❌ 로컬 파일 로드 중 오류 발생: {fe}")
+    else:
+        print(f"❌ 로컬 파일이 존재하지 않습니다: {fallback_path}")
+
+    raise RuntimeError(
+        f"종목 리스트 조회 실패: FDR API 및 로컬 파일({fallback_path}) 모두 사용 불가"
+    )
 
 
 class RawPriceCollector:
     """
     KRX 원시 데이터 수집 및 다중 포맷 저장 클래스
-    
+
     ✨ H1+H2 패치: ProjectPaths 기반 경로 관리
     """
 
@@ -91,22 +100,22 @@ class RawPriceCollector:
         """
         self.cfg = config
         self.ref_date = config['project']['reference_date']
-        
+
         # ✨ H2 패치: ProjectPaths 사용
         if paths is None:
             from src.utils.config import ProjectPaths
             self.paths = ProjectPaths.from_config(config)
         else:
             self.paths = paths
-        
+
         # 경로 설정
         self.base_dir = self.paths.raw_dir
         self.csv_dir = self.paths.get_raw_csv_dir()
-        
+
         # 결과 파일 경로
         self.parquet_path = self.paths.get_raw_parquet()
         self.master_path = self.paths.get_ticker_master()
-        
+
         # 디렉토리 생성
         self.base_dir.mkdir(parents=True, exist_ok=True)
         if self.cfg['data_collection'].get('save_csv', False):
@@ -114,19 +123,19 @@ class RawPriceCollector:
 
     def fetch_ohlcv(self, ticker: str) -> pd.DataFrame:
         """단일 종목 OHLCV 조회 및 표준화"""
-        try:            
+        try:
             start = self.cfg['data_collection']['start_date']
             end = self.cfg['data_collection']['end_date']
-            
+
             # 날짜 포맷 표준화 (FinanceDataReader 대응)
             start_fmt = pd.to_datetime(start).strftime('%Y-%m-%d')
             end_fmt = pd.to_datetime(end).strftime('%Y-%m-%d')
-            
+
             df = fdr.DataReader(ticker, start_fmt, end_fmt)
-            
+
             if df.empty:
                 return pd.DataFrame()
-            
+
             # 컬럼명 표준화 (데이터 계약 준수)
             df = df.reset_index()
             df = df.rename(columns={
@@ -140,7 +149,7 @@ class RawPriceCollector:
             })
             df['ticker'] = ticker
             df['date'] = pd.to_datetime(df['date'])
-            
+
             return df
         except Exception:
             return pd.DataFrame()
@@ -160,7 +169,7 @@ class RawPriceCollector:
         # 2. 개별 종목 순회 수집
         for ticker, name in tqdm(ticker_list, desc="수집 중"):
             df = self.fetch_ohlcv(ticker)
-            
+
             if df.empty:
                 stats['empty'] += 1
                 continue
@@ -186,10 +195,10 @@ class RawPriceCollector:
             print(f"📦 데이터 병합 중... (총 {len(all_dfs)}개 종목)")
             df_total = pd.concat(all_dfs, ignore_index=True)
             df_total = df_total.sort_values(['ticker', 'date'])
-            
+
             df_total.to_parquet(
-                self.parquet_path, 
-                compression='snappy', 
+                self.parquet_path,
+                compression='snappy',
                 index=False
             )
             print(f"✅ 통합 Parquet 저장 완료: {self.parquet_path}")
