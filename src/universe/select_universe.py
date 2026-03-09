@@ -56,14 +56,15 @@ from src.universe.filters import apply_hard_filters
 # ==========================================
 
 # ============================================================
-# src/universe/select_universe.py 패치 (v3.9.0)
+# src/universe/select_universe.py 패치 (v3.9.1)
 #
-# evaluate_model_accuracy() 수정:
-#   log_return_1d 모드에서 pred/true를 로그 종가 스케일로 변환 후
-#   RMSE/IC 산출. 기준가는 log_close_ref 파라미터로 수신.
+# evaluate_model_accuracy():
+#   log_return_1d 모드에서 pred/true를 로그 종가 스케일로 변환 시
+#   사다리꼴 보정 적용.
+#   Δy(t) 앵커: log_close_ref에 target_log_return_1d 컬럼 포함 필요.
 #
-# select_investment_universe() 수정:
-#   target_columns, log_close_ref 파라미터 추가 및 전파.
+# select_investment_universe():
+#   target_columns, log_close_ref 파라미터 전파 (v3.9.0 도입 유지).
 # ============================================================
 
 
@@ -71,7 +72,7 @@ def evaluate_model_accuracy(
     df_past_predictions: pd.DataFrame,
     model_date: str,
     target_columns: Optional[List[str]] = None,
-    log_close_ref: Optional[pd.DataFrame] = None,   # ✨ v3.9.0
+    log_close_ref: Optional[pd.DataFrame] = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -79,26 +80,15 @@ def evaluate_model_accuracy(
 
     Parameters
     ----------
-    df_past_predictions : pd.DataFrame
-        과거 예측 결과 (Step 3 출력).
-        필수 컬럼: ticker, date, pred_{col}, true_{col}
-    model_date : str
-        모델 학습 기준일 (이 날짜까지만 평가).
-    target_columns : list, optional
-        평가할 horizon 컬럼명 리스트.
-        기본값: [f'target_log_close_h{h}' for h in range(1, 6)]
-    log_close_ref : pd.DataFrame, optional  ✨ v3.9.0
-        log_return_1d 모드 전용. 로그 종가 기준값 테이블.
-        필수 컬럼: ticker, date, target_log_close
-        제공 시 pred/true를 cumsum → 로그 종가로 변환 후 RMSE/IC 산출.
+    log_close_ref : pd.DataFrame, optional
+        log_return_1d 모드 전용.
+        필수 컬럼: ticker, date, target_log_close, target_log_return_1d  ✨ v3.9.1
+        제공 시 pred/true를 사다리꼴 → 로그 종가로 변환 후 RMSE/IC 산출.
         None이면 pred/true를 그대로 사용 (log_close 모드 기존 동작).
-    verbose : bool
-        진행 상황 출력 여부.
     """
     if target_columns is None:
         target_columns = [f'target_log_close_h{h}' for h in range(1, 6)]
 
-    # horizon 순서 보장 (cumsum에 필수)
     sorted_cols = sorted(target_columns, key=lambda c: int(c.split('_h')[-1]))
 
     model_date_dt = pd.to_datetime(model_date)
@@ -112,10 +102,13 @@ def evaluate_model_accuracy(
             f"   predictions.parquet의 날짜 범위를 확인하세요."
         )
 
-    # ── log_return_1d 모드: 로그 종가 기준값 조인 ─────────────────────
+    # ── log_return_1d 모드: 로그 종가 기준값 + Δy(t) 앵커 조인 ───────
     use_conversion = (log_close_ref is not None)
     if use_conversion:
-        ref = log_close_ref[['ticker', 'date', 'target_log_close']].copy()
+        ref_cols = ['ticker', 'date', 'target_log_close']
+        if 'target_log_return_1d' in log_close_ref.columns:
+            ref_cols.append('target_log_return_1d')
+        ref = log_close_ref[ref_cols].copy()
         ref['date'] = pd.to_datetime(ref['date'])
         df_eval = df_eval.merge(ref, on=['ticker', 'date'], how='left')
 
@@ -134,9 +127,18 @@ def evaluate_model_accuracy(
             if pred_col not in ticker_eval.columns or true_col not in ticker_eval.columns:
                 continue
 
-            # ── 로그 종가 변환 (log_return_1d 모드) ──────────────────
+            # ── 로그 종가 사다리꼴 변환 (log_return_1d 모드) ─────────
             if use_conversion and 'target_log_close' in ticker_eval.columns:
                 log_close_base = ticker_eval['target_log_close'].values
+
+                # Δy(t) 앵커: 실측 log return (없으면 0으로 fallback)
+                if 'target_log_return_1d' in ticker_eval.columns:
+                    delta_y_t = ticker_eval['target_log_return_1d'].values
+                else:
+                    delta_y_t = np.zeros(len(ticker_eval))
+
+                pred_delta_h = ticker_eval[pred_col].values   # Δy(t+h) 예측
+                true_delta_h = ticker_eval[true_col].values   # Δy(t+h) 실측
 
                 cum_pred = sum(
                     ticker_eval[f'pred_{c}'].values
@@ -148,12 +150,14 @@ def evaluate_model_accuracy(
                     for c in sorted_cols[:idx + 1]
                     if f'true_{c}' in ticker_eval.columns
                 )
-                pred_vals = log_close_base + cum_pred
-                true_vals = log_close_base + cum_true
+
+                # ✨ 사다리꼴: y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
+                pred_vals = log_close_base + cum_pred + (delta_y_t - pred_delta_h) / 2
+                true_vals = log_close_base + cum_true + (delta_y_t - true_delta_h) / 2
             else:
                 pred_vals = ticker_eval[pred_col].values
                 true_vals = ticker_eval[true_col].values
-            # ──────────────────────────────────────────────────────────
+            # ─────────────────────────────────────────────────────────
 
             mask = ~np.isnan(pred_vals) & ~np.isnan(true_vals)
             if mask.sum() < 2:
@@ -456,9 +460,9 @@ def select_investment_universe(
         evaluate_model_accuracy에 전달할 타겟 컬럼명 리스트.
         None이면 기본값(target_log_close_h1~h5) 사용.
 
-    log_close_ref : pd.DataFrame, optional  ✨ v3.9.0
+    log_close_ref : pd.DataFrame, optional  ✨ v3.9.1 갱신
         log_return_1d 모드 전용. 로그 종가 기준값 테이블.
-        필수 컬럼: ticker, date, target_log_close
+        필수 컬럼: ticker, date, target_log_close, target_log_return_1d
         05단계 노트북에서 df_dataset의 해당 컬럼을 슬라이싱하여 전달.
         None이면 변환 없이 기존 동작 유지 (log_close 모드).
 

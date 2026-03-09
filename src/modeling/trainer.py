@@ -4,6 +4,12 @@
 #   2. target_type="log_return_1d" 신규 추가
 #      → target_log_return_1d_h{n}(t) = np.log1p(change_pct(t+n))
 #      → 02단계에서 np.log1p(df['change_pct'])로 직접 생성된 컬럼을 shift(-n)
+#
+# v3.9.1 변경사항:
+#   3. log_return_1d 모드 역산: cumsum → 사다리꼴 적분 보정
+#      y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
+#      Δy(t): 현재 시점 실측 log return (target_log_return_1d, shift 없음)
+#      cols_needed에 self.target_col_name 추가하여 eval_df에 포함
 
 from __future__ import annotations
 import warnings
@@ -44,10 +50,11 @@ class WalkForwardTrainer:
             "log_return_1d" : target_log_return_1d_h{n}(t) = log1p(change_pct(t+n))
                               당일 등락률의 로그값. shift(-n)으로 t+n 시점의 값을 사용.
                               역산: close(t+h) = close(t) × exp(Σ pred_h{i}, i=1..h)
+                              ✨ v3.9.1: 사다리꼴 보정 적용
+                              y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
 
             ❌ "log_return"  : v3.9.0에서 정식 폐기. 사용 불가.
         """
-        # log_return 정식 폐기 — ValueError로 즉시 차단
         if target_type == "log_return":
             raise ValueError(
                 "[REMOVED v3.9.0] target_type='log_return'은 정식 폐기되었습니다. "
@@ -198,10 +205,17 @@ class WalkForwardTrainer:
         # 4. 공통 전처리: 필요한 컬럼만 추출
         # ──────────────────────────────────────────
         # log_return_1d 모드: 보고 지표(RMSE/IC)를 로그 종가 스케일로 통일하기 위해
-        # target_log_close를 평가용 기준값으로 함께 전달
+        #   - target_log_close : 기준값 y(t)
+        #   - target_col_name  : Δy(t) 앵커 (사다리꼴 보정용, ✨ v3.9.1)
         _ref_col = 'target_log_close'
-        _extra   = [_ref_col] if (self.target_type == "log_return_1d"
-                                  and _ref_col in df_run.columns) else []
+        _extra   = []
+        if self.target_type == "log_return_1d":
+            if _ref_col in df_run.columns:
+                _extra.append(_ref_col)
+            # ✨ v3.9.1: Δy(t) 앵커 컬럼 추가 (사다리꼴 보정)
+            if self.target_col_name in df_run.columns:
+                _extra.append(self.target_col_name)
+
         cols_needed = [self.date_col, 'ticker'] + self.feature_cols + target_cols + _extra
         temp_df = df_run[cols_needed].copy()
 
@@ -323,11 +337,17 @@ class WalkForwardTrainer:
         log_return_1d 모드:
             모델 내부 학습/조기종료는 로그 등락률 스케일로 진행되지만,
             보고 지표(RMSE/IC)는 로그 종가 스케일로 환산하여 산출.
-            → close(t+h) 복원: log_close(t) + Σ pred_h{i}, i=1..h  (cumsum)
-            → 기준값 log_close(t): eval_df의 'target_log_close' 컬럼 사용
+
+            ✨ v3.9.1 사다리꼴 보정:
+                y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
+
+                cumsum_h = Σ pred_h{i}, i=1..h   (예측 log return 누적합)
+                Δy(t)    = target_log_return_1d   (현재 시점 실측 log return, 앵커)
+                Δy(t+h)  = pred/true_h            (h시점 예측/실측 log return)
+                y(t)     = target_log_close        (현재 시점 로그 종가, 기준값)
         """
         if eval_df.empty:
-            return {'avg_rmse': np.nan, 'avg_ic': np.nan, 'per_horizon': {}, 'samples': 0}
+            return {'rms_rmse': np.nan, 'avg_rmse': np.nan, 'avg_ic': np.nan, 'per_horizon': {}, 'samples': 0}
 
         preds_df = self.model.predict(eval_df[self.feature_cols])
         if isinstance(preds_df, np.ndarray):
@@ -338,17 +358,26 @@ class WalkForwardTrainer:
             temp_eval[f'pred_{col}'] = preds_df[col].values
             temp_eval[f'true_{col}'] = eval_df[col].values
 
-        # ── log_return_1d: 로그 종가 스케일로 변환 ────────────────
+        # ── log_return_1d: 로그 종가 스케일로 변환 (✨ v3.9.1 사다리꼴) ──
         if self.target_type == "log_return_1d" and 'target_log_close' in eval_df.columns:
             log_close_base = eval_df['target_log_close'].values
-            sorted_cols = sorted(target_cols, key=lambda c: int(c.split('_h')[-1]))
+            sorted_cols    = sorted(target_cols, key=lambda c: int(c.split('_h')[-1]))
+
+            # Δy(t): 현재 시점 실측 log return (사다리꼴 앵커)
+            delta_y_t = eval_df[self.target_col_name].values  # target_log_return_1d
 
             for idx, col in enumerate(sorted_cols):
-                cum_pred = sum(temp_eval[f'pred_{c}'].values for c in sorted_cols[:idx + 1])
-                cum_true = sum(temp_eval[f'true_{c}'].values for c in sorted_cols[:idx + 1])
-                temp_eval[f'pred_{col}'] = log_close_base + cum_pred
-                temp_eval[f'true_{col}'] = log_close_base + cum_true
-        # ─────────────────────────────────────────────────────────
+                # 원래 log return 예측/실측값 (덮어쓰기 전 preds_df, eval_df 직접 참조)
+                pred_delta_h = preds_df[col].values    # Δy(t+h) 예측
+                true_delta_h = eval_df[col].values     # Δy(t+h) 실측
+
+                cum_pred = sum(preds_df[c].values for c in sorted_cols[:idx + 1])
+                cum_true = sum(eval_df[c].values  for c in sorted_cols[:idx + 1])
+
+                # 사다리꼴: y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
+                temp_eval[f'pred_{col}'] = log_close_base + cum_pred + (delta_y_t - pred_delta_h) / 2
+                temp_eval[f'true_{col}'] = log_close_base + cum_true + (delta_y_t - true_delta_h) / 2
+        # ────────────────────────────────────────────────────────────────
 
         per_horizon = {}
         for col in target_cols:
