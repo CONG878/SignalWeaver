@@ -1,34 +1,8 @@
 """
 Universe Selection Module - Facade Pattern
 
-✨ H3 패치 (2026-02-08):
-    - 기존: 미사용 함수들
-    - 개선: Step 5 노트북의 200줄 로직을 모듈로 캡슐화
-    - 패턴: Facade (복잡한 흐름을 단일 인터페이스로 제공)
-
-✨ v3.7.2 패치 (2026-02-24):
-    - evaluate_expected_returns(): max_daily_log_return 파라미터 추가
-    - select_investment_universe(): max_daily_log_return 파라미터 추가 및 전파
-
-주요 기능:
-1. evaluate_model_accuracy(): 과거 예측 정확도 평가
-2. evaluate_expected_returns(): 미래 기대 수익률 계산
-3. evaluate_risk_metrics(): 종목 내재 위험 평가
-4. select_investment_universe(): 전체 흐름 통합 (Facade)
-
-사용 예시:
-    >>> from src.universe.select_universe import select_investment_universe
-    >>>
-    >>> results = select_investment_universe(
-    ...     df_past_predictions,
-    ...     df_future_forecasts,
-    ...     df_meta,
-    ...     model_date='2026-01-20',
-    ...     top_k=200
-    ... )
-    >>>
-    >>> df_candidates = results['candidates']  # Top-K 후보
-    >>> df_full = results['full']              # 전체 Universe
+모델의 예측 결과(정확도, 수익성, 위험도)를 종합하여 최적의 투자 후보군을 선정합니다.
+복잡한 평가 흐름을 `select_investment_universe` 단일 인터페이스(Facade)로 제공합니다.
 """
 
 from __future__ import annotations
@@ -39,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from tqdm import tqdm
 from scipy.stats import spearmanr
 
-# 범용 계산 유틸리티 (utils에 유지)
+# 범용 계산 유틸리티
 from src.utils.trading import find_best_trade_vectorized
 from src.utils.risk import (
     calculate_risk_metrics,
@@ -47,26 +21,13 @@ from src.utils.risk import (
     normalize_risk_scores,
 )
 
-# 한국 시장 특화 필터 (universe로 이전됨)
+# 한국 시장 특화 필터
 from src.universe.filters import apply_hard_filters
 
 
 # ==========================================
 # 1. 정확도 평가 (Accuracy Evaluation)
 # ==========================================
-
-# ============================================================
-# src/universe/select_universe.py 패치 (v3.9.1)
-#
-# evaluate_model_accuracy():
-#   log_return_1d 모드에서 pred/true를 로그 종가 스케일로 변환 시
-#   사다리꼴 보정 적용.
-#   Δy(t) 앵커: log_close_ref에 target_log_return_1d 컬럼 포함 필요.
-#
-# select_investment_universe():
-#   target_columns, log_close_ref 파라미터 전파 (v3.9.0 도입 유지).
-# ============================================================
-
 
 def evaluate_model_accuracy(
     df_past_predictions: pd.DataFrame,
@@ -76,15 +37,21 @@ def evaluate_model_accuracy(
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
-    과거 예측 데이터로부터 모델 정확도 평가.
+    과거 예측 데이터로부터 모델 정확도를 평가합니다.
 
     Parameters
     ----------
+    df_past_predictions : pd.DataFrame
+        과거 예측 결과
+    model_date : str
+        모델 학습 기준일 (이전 데이터만 평가에 사용)
+    target_columns : List[str], optional
+        평가할 타겟 컬럼 리스트
     log_close_ref : pd.DataFrame, optional
-        log_return_1d 모드 전용.
-        필수 컬럼: ticker, date, target_log_close, target_log_return_1d  ✨ v3.9.1
-        제공 시 pred/true를 사다리꼴 → 로그 종가로 변환 후 RMSE/IC 산출.
-        None이면 pred/true를 그대로 사용 (log_close 모드 기존 동작).
+        log_return_1d 모드 전용. 로그 종가 역산을 위한 사다리꼴 앵커 데이터프레임.
+        필수 컬럼: ticker, date, target_log_close, target_log_return_1d
+    verbose : bool
+        진행 상황 출력 여부
     """
     if target_columns is None:
         target_columns = [f'target_log_close_h{h}' for h in range(1, 6)]
@@ -102,7 +69,7 @@ def evaluate_model_accuracy(
             f"   predictions.parquet의 날짜 범위를 확인하세요."
         )
 
-    # ── log_return_1d 모드: 로그 종가 기준값 + Δy(t) 앵커 조인 ───────
+    # log_return_1d 모드: 로그 종가 기준값 + Δy(t) 앵커 조인
     use_conversion = (log_close_ref is not None)
     if use_conversion:
         ref_cols = ['ticker', 'date', 'target_log_close']
@@ -127,37 +94,32 @@ def evaluate_model_accuracy(
             if pred_col not in ticker_eval.columns or true_col not in ticker_eval.columns:
                 continue
 
-            # ── 로그 종가 사다리꼴 변환 (log_return_1d 모드) ─────────
             if use_conversion and 'target_log_close' in ticker_eval.columns:
                 log_close_base = ticker_eval['target_log_close'].values
-
-                # Δy(t) 앵커: 실측 log return (없으면 0으로 fallback)
+                
                 if 'target_log_return_1d' in ticker_eval.columns:
                     delta_y_t = ticker_eval['target_log_return_1d'].values
                 else:
                     delta_y_t = np.zeros(len(ticker_eval))
 
-                pred_delta_h = ticker_eval[pred_col].values   # Δy(t+h) 예측
-                true_delta_h = ticker_eval[true_col].values   # Δy(t+h) 실측
+                pred_delta_h = ticker_eval[pred_col].values
+                true_delta_h = ticker_eval[true_col].values
 
                 cum_pred = sum(
-                    ticker_eval[f'pred_{c}'].values
-                    for c in sorted_cols[:idx + 1]
+                    ticker_eval[f'pred_{c}'].values for c in sorted_cols[:idx + 1]
                     if f'pred_{c}' in ticker_eval.columns
                 )
                 cum_true = sum(
-                    ticker_eval[f'true_{c}'].values
-                    for c in sorted_cols[:idx + 1]
+                    ticker_eval[f'true_{c}'].values for c in sorted_cols[:idx + 1]
                     if f'true_{c}' in ticker_eval.columns
                 )
 
-                # ✨ 사다리꼴: y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
+                # 사다리꼴 적분 보정
                 pred_vals = log_close_base + cum_pred + (delta_y_t - pred_delta_h) / 2
                 true_vals = log_close_base + cum_true + (delta_y_t - true_delta_h) / 2
             else:
                 pred_vals = ticker_eval[pred_col].values
                 true_vals = ticker_eval[true_col].values
-            # ─────────────────────────────────────────────────────────
 
             mask = ~np.isnan(pred_vals) & ~np.isnan(true_vals)
             if mask.sum() < 2:
@@ -204,54 +166,28 @@ def evaluate_model_accuracy(
 def evaluate_expected_returns(
     df_future_forecasts: pd.DataFrame,
     min_hold_days: int = 5,
-    max_daily_return: Optional[float] = 0.16,  # ✨ v3.7.2: config 직관값 (0.16 = 16%)
+    max_daily_return: Optional[float] = 0.16,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
-    미래 예측 데이터로부터 기대 수익률 계산.
-
-    노트북의 수익성 평가 루프를 모듈로 추출.
+    미래 예측 데이터로부터 기대 수익률을 계산합니다.
 
     Parameters
     ----------
     df_future_forecasts : pd.DataFrame
-        미래 예측 결과 (Step 4 출력)
-        필수 컬럼: ticker, date, pred_log_close, pred_close
-    min_hold_days : int
+        미래 예측 결과
+    min_hold_days : int, default=5
         최소 보유 기간 (일)
     max_daily_return : float or None, default=0.16
-        허용 가능한 일평균 수익률 상한 (직관적 소수 형태). ✨ v3.7.2
-        내부에서 ``np.log1p(max_daily_return)`` 으로 변환하여 탐색에 사용.
-        이 값을 초과하는 거래는 탐색 대상에서 제외되며,
-        상한 이하의 차선 거래가 반환됩니다.
-        ``None`` 이면 상한 없이 전체 탐색합니다.
+        최적 거래 탐색 시 허용 가능한 일평균 수익률 상한. 상한을 초과하는 거래는 탐색에서 제외됩니다.
     verbose : bool
         진행 상황 출력 여부
-
-    Returns
-    -------
-    pd.DataFrame
-        종목별 수익성 지표
-        컬럼: ticker, daily_log_return, total_log_return, total_return_pct,
-              annualized_return, hold_days, buy_date, sell_date,
-              buy_price, sell_price, return_rank
-
-    Examples
-    --------
-    >>> df_return = evaluate_expected_returns(df_future, min_hold_days=5)
-    >>> print(df_return.nlargest(10, 'daily_log_return'))
-
-    >>> # 상한 비활성화 (기존 동작)
-    >>> df_return = evaluate_expected_returns(df_future, max_daily_return=None)
     """
-    # 직관적 수익률 → 로그 수익률 변환
     max_daily_log_return = np.log1p(max_daily_return) if max_daily_return is not None else None
 
     if verbose:
-        if max_daily_return is not None:
-            print(f"\n💰 수익성 평가 중 (시간당 로그 수익률 기준, 상한={max_daily_return:.1%}/일)...")
-        else:
-            print(f"\n💰 수익성 평가 중 (시간당 로그 수익률 기준, 상한=없음)...")
+        limit_str = f"{max_daily_return:.1%}/일" if max_daily_return is not None else "없음"
+        print(f"\n💰 수익성 평가 중 (시간당 로그 수익률 기준, 상한={limit_str})...")
 
     return_metrics  = []
     failed_tickers  = []
@@ -273,7 +209,6 @@ def evaluate_expected_returns(
 
             log_prices = ticker_data['pred_log_close'].values
 
-            # ✨ v3.7.2: max_daily_log_return 전파
             buy_idx, sell_idx, daily_log_return, hold_days = find_best_trade_vectorized(
                 log_prices,
                 min_hold=min_hold_days,
@@ -323,7 +258,7 @@ def evaluate_expected_returns(
     if verbose:
         print(f"\n✅ 수익성 평가 완료")
         print(f"   - 성공 종목 수: {len(df_return):,}개")
-        print(f"   - 실패 종목 수: {len(failed_tickers):,}개 (상한 초과로 제외된 종목 포함)")
+        print(f"   - 실패 종목 수: {len(failed_tickers):,}개 (상한 초과 포함)")
         print(f"   - 평균 시간당 로그 수익률: {df_return['daily_log_return'].mean():.6f}")
         print(f"   - 평균 총 수익률: {df_return['total_return_pct'].mean():.2f}%")
 
@@ -340,28 +275,16 @@ def evaluate_risk_metrics(
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
-    예측 시계열로부터 종목 내재 위험 평가.
-
-    노트북의 위험도 평가 루프를 모듈로 추출.
+    예측 시계열로부터 종목 내재 위험도를 평가합니다.
 
     Parameters
     ----------
     df_future_forecasts : pd.DataFrame
-        미래 예측 결과 (Step 4 출력)
-        필수 컬럼: ticker, date, pred_log_close
+        미래 예측 결과
     df_meta : pd.DataFrame
-        메타 정보 (Step 2 출력)
-        필수 컬럼: ticker, liquidity_score, is_suspended, is_delisted
+        종목 메타 정보
     verbose : bool
         진행 상황 출력 여부
-
-    Returns
-    -------
-    pd.DataFrame
-        종목별 위험 지표
-        컬럼: ticker, volatility, downside_risk, var_95, cvar_95,
-              max_drawdown, skewness, kurtosis, risk_composite_raw,
-              risk_score_normalized, safety_score
     """
     if verbose:
         print(f"\n⚠️  위험도 평가 중 (5대 표준 지표)...")
@@ -433,11 +356,7 @@ def evaluate_risk_metrics(
 # ==========================================
 # 4. 통합 Universe 선정 (Facade)
 # ==========================================
-# ============================================================
-# select_universe.py 패치 (v3.9.0)
-# 수정 1: select_investment_universe() 시그니처에 target_columns 추가
-# 수정 2: 내부에서 evaluate_model_accuracy()로 전달
-# ============================================================
+
 def select_investment_universe(
     df_past_predictions: pd.DataFrame,
     df_future_forecasts: pd.DataFrame,
@@ -447,26 +366,13 @@ def select_investment_universe(
     top_k: int = 200,
     min_hold_days: int = 5,
     max_daily_return: Optional[float] = 0.16,
-    target_columns: Optional[List[str]] = None,       # ✨ v3.9.0
-    log_close_ref: Optional[pd.DataFrame] = None,     # ✨ v3.9.0
+    target_columns: Optional[List[str]] = None,
+    log_close_ref: Optional[pd.DataFrame] = None,
     filter_config: Optional[Dict] = None,
     verbose: bool = True,
 ) -> Dict[str, Any]:
     """
-    Step 5 전체 로직 캡슐화 (Facade Pattern).
-    (기존 파라미터 docstring 유지, 신규 항목만 추가)
-
-    target_columns : list, optional  ✨ v3.9.0
-        evaluate_model_accuracy에 전달할 타겟 컬럼명 리스트.
-        None이면 기본값(target_log_close_h1~h5) 사용.
-
-    log_close_ref : pd.DataFrame, optional  ✨ v3.9.1 갱신
-        log_return_1d 모드 전용. 로그 종가 기준값 테이블.
-        필수 컬럼: ticker, date, target_log_close, target_log_return_1d
-        05단계 노트북에서 df_dataset의 해당 컬럼을 슬라이싱하여 전달.
-        None이면 변환 없이 기존 동작 유지 (log_close 모드).
-
-    노트북에서는 이 함수 하나만 호출하면 됩니다.
+    정확도, 수익성, 위험도를 종합 평가하여 투자 후보군을 선정합니다 (Facade).
 
     Parameters
     ----------
@@ -475,52 +381,28 @@ def select_investment_universe(
     df_future_forecasts : pd.DataFrame
         미래 예측 결과 (Step 4)
     df_meta : pd.DataFrame
-        메타 정보 (Step 2, 최신 날짜만)
+        메타 정보 (최신 날짜만 필터링 된 데이터)
     model_date : str
-        모델 학습 기준일 (정확도 평가 기준)
-    top_k : int
+        모델 학습 기준일 (정확도 평가 기준점)
+    top_k : int, default=200
         최종 선정할 후보 종목 수
     min_hold_days : int, default=5
-        최소 보유 기간 (일). config의 ``strategy.min_hold_days`` 에서 읽어 전달. ✨ v3.7.2
-    max_daily_return : float or None, default=0.16
-        최적 거래 탐색 시 허용 가능한 일평균 수익률 상한 (직관적 소수 형태). ✨ v3.7.2
-        config의 ``strategy.max_daily_return`` 에서 읽어 전달.
-        내부에서 ``np.log1p()`` 변환 후 탐색에 사용.
-        상한을 초과하는 거래는 탐색 제외 → 차선 거래가 후보로 제안됨.
-        하드 필터와 달리 종목 자체는 제거되지 않습니다.
-        ``None`` 이면 상한 없이 탐색합니다.
+        최소 보유 기간 (일)
+    max_daily_return : float, optional, default=0.16
+        최적 거래 탐색 시 허용 가능한 일평균 수익률 상한. 상한을 초과하는 거래는 배제됩니다.
+    target_columns : List[str], optional
+        평가할 타겟 컬럼 리스트
+    log_close_ref : pd.DataFrame, optional
+        log_return_1d 모드 역산용 사다리꼴 앵커
     filter_config : dict, optional
-        하드 필터 설정 (없으면 기본값 사용)
+        하드 필터 설정
     verbose : bool
         진행 상황 출력 여부
-
+        
     Returns
     -------
     dict
-        - 'accuracy'     : 정확도 평가 결과 (DataFrame)
-        - 'returns'      : 수익성 평가 결과 (DataFrame)
-        - 'risk'         : 위험도 평가 결과 (DataFrame)
-        - 'full'         : 전체 Universe (필터링 후, DataFrame)
-        - 'candidates'   : Top-K 후보 (DataFrame)
-        - 'filter_stats' : 필터링 통계 (dict)
-
-    Examples
-    --------
-    >>> # config 값을 직접 전달하는 권장 방식
-    >>> results = select_investment_universe(
-    ...     df_past_pred, df_future, df_meta_latest,
-    ...     model_date=cfg['universe']['model_date'],
-    ...     top_k=200,
-    ...     min_hold_days=cfg['strategy']['min_hold_days'],
-    ...     max_daily_return=cfg['strategy']['max_daily_return'],
-    ... )
-
-    >>> # 상한 비활성화 (기존 동작)
-    >>> results = select_investment_universe(
-    ...     df_past_pred, df_future, df_meta_latest,
-    ...     model_date='2026-01-20',
-    ...     max_daily_return=None,
-    ... )
+        평가 결과 및 최종 후보군(candidates)을 포함하는 딕셔너리
     """
     if verbose:
         print("\n" + "=" * 65)
@@ -533,17 +415,14 @@ def select_investment_universe(
             print(f"   수익률 상한:     없음")
         print("=" * 65)
 
-    # ── 1. 정확도 평가 ────────────────────────────────────────────────
-    # ✨ v3.9.0: target_columns 전달 추가
     df_accuracy = evaluate_model_accuracy(
         df_past_predictions,
         model_date=model_date,
-        target_columns=target_columns,   # ✨ v3.9.0
-        log_close_ref=log_close_ref,     # ✨ v3.9.0
+        target_columns=target_columns,
+        log_close_ref=log_close_ref,
         verbose=verbose,
     )
 
-    # ── 2. 수익성 평가 ✨ v3.7.2: config 파라미터 전파 ────────────────
     df_return = evaluate_expected_returns(
         df_future_forecasts,
         min_hold_days=min_hold_days,
@@ -551,14 +430,12 @@ def select_investment_universe(
         verbose=verbose,
     )
 
-    # ── 3. 위험도 평가 ────────────────────────────────────────────────
     df_risk = evaluate_risk_metrics(
         df_future_forecasts,
         df_meta,
         verbose=verbose,
     )
 
-    # ── 4. 3대 지표 통합 ──────────────────────────────────────────────
     if verbose:
         print(f"\n🔗 평가 지표 통합 중...")
 
@@ -568,7 +445,6 @@ def select_investment_universe(
     if verbose:
         print(f"   - 통합 완료: {len(df_universe):,}개 종목")
 
-    # ── 5. 하드 필터링 ────────────────────────────────────────────────
     df_filtered, filter_stats = apply_hard_filters(
         df_universe,
         df_future_forecasts,
@@ -577,7 +453,6 @@ def select_investment_universe(
         verbose=verbose,
     )
 
-    # ── 6. 수익률 기준 정렬 및 Top-K 선정 ────────────────────────────
     if verbose:
         print(f"\n📊 수익률 기준 정렬 및 Top-K 선정 중...")
 

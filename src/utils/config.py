@@ -1,15 +1,11 @@
 """
-Configuration management module
+Configuration & Path Management
 
-✨ H2 패치: 경로 관리 중앙화
-- ProjectPaths 클래스 추가
-- 모든 노트북에서 일관된 경로 사용
-- 단계별 독립 경로 지원 (H1 패치 반영)
+YAML 설정 파일 로드, 경로 중앙 관리, 모델명 정규화를 담당합니다.
 
-✨ v3.8.0 패치: 앙상블 확장성
-- 모델명 해석 헬퍼 함수 추가 (parse_active_model, get_folder_name 등)
-- active_model에 '+' 구분자로 앙상블 조합 지정 지원
-- ProjectPaths.training_dir이 get_folder_name() 기반으로 동적 결정됨
+## 버전
+- v3.8.0: 동적 모델 명칭 정규화 (parse_active_model, get_folder_name)
+- H2 패치: ProjectPaths 클래스 도입으로 경로 관리 중앙화
 """
 
 import yaml
@@ -35,7 +31,7 @@ def get_path(base_path: str, reference_date: str) -> Path:
 
 
 # ==========================================
-# ✨ v3.8.0: 모델명 해석 헬퍼
+# v3.8.0: 모델명 해석 헬퍼 함수
 # ==========================================
 
 # 허용 입력값 → (canonical, short) 매핑 테이블
@@ -172,19 +168,16 @@ def get_folder_name(active_model_str: str) -> str:
 @dataclass
 class ProjectPaths:
     """
-    프로젝트 전체 경로를 관리하는 중앙화 클래스
+    프로젝트 경로 관리 (중앙화)
 
-    사용 예:
+    전체 파이프라인(01~05단계)의 입출력 경로를 단일 클래스에서 관리합니다.
+    단일 모델과 앙상블 모두 지원하며, ProjectPaths.from_config(cfg)로 초기화합니다.
+
+    Examples
+    --------
     >>> paths = ProjectPaths.from_config(cfg)
-    >>> model_path = paths.get_model_path("lightgbm_multi")
-    >>> forecast_output = paths.forecasts_dir
-
-    특징:
-    - H1 패치 반영: 단계별 독립 경로
-    - 하위 호환성 유지: 기존 단일 모델 코드도 동작
-    - 타입 안전: IDE 자동완성 지원
-    - ✨ v3.8.0: training_dir이 get_folder_name() 기반으로 동적 결정됨
-      예) active_model="lgbm+rf" → training_dir = .../lgbm+rf/
+    >>> paths.ensure_dirs()  # 모든 필요 디렉토리 생성
+    >>> parquet_path = paths.get_raw_parquet()
     """
 
     reference_date: str   # 기준일
@@ -209,14 +202,19 @@ class ProjectPaths:
         Parameters
         ----------
         config : dict
-            load_config()의 반환값
+            load_config()의 반환값. 필수 키: project.reference_date, paths.*, active_model
         reference_date : str, optional
-            기준일 (없으면 config에서 추출)
+            기준일 (YYYYMMDD). 미제공 시 config['project']['reference_date'] 사용.
 
         Returns
         -------
         ProjectPaths
             초기화된 경로 객체
+
+        Notes
+        -----
+        - active_model이 "lgbm+rf" 같은 앙상블이면 폴더명이 자동 결정됨
+        - training_dir은 model_date 기반으로 설정됨
         """
         ref_date = reference_date or config['project']['reference_date']
         active_model_str = config.get('active_model', 'lightgbm')
@@ -234,8 +232,7 @@ class ProjectPaths:
             processed_dir=Path(paths_cfg['processed_dir']) / ref_date,
             meta_dir=Path(paths_cfg['meta_dir']),
 
-            # 단계별 경로
-            # ✨ v3.8.0: folder_name 기반 동적 결정
+            # 단계별 경로 (v3.8.0: folder_name 기반 동적 결정)
             training_dir=Path(paths_cfg['training_dir']) / model_date / folder,
             forecasts_dir=Path(paths_cfg['forecasts_dir']) / ref_date / folder,
             universe_dir=Path(paths_cfg['universe_dir']) / ref_date / folder,
@@ -364,7 +361,8 @@ class ProjectPaths:
     def ensure_dirs(self):
         """
         모든 출력 디렉토리 생성.
-        노트북 시작 시 호출하여 디렉토리 자동 생성.
+        
+        노트북 시작 시 호출하여 필요한 모든 디렉토리를 자동으로 생성합니다.
         """
         dirs_to_create = [
             self.raw_dir,

@@ -1,25 +1,13 @@
 # src/modeling/trainer.py
-# v3.9.0 변경사항:
-#   1. target_type="log_return" → 정식 폐기 (ValueError로 즉시 차단)
-#   2. target_type="log_return_1d" 신규 추가
-#      → target_log_return_1d_h{n}(t) = np.log1p(change_pct(t+n))
-#      → 02단계에서 np.log1p(df['change_pct'])로 직접 생성된 컬럼을 shift(-n)
-#
-# v3.9.1 변경사항:
-#   3. log_return_1d 모드 역산: cumsum → 사다리꼴 적분 보정
-#      y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
-#      Δy(t): 현재 시점 실측 log return (target_log_return_1d, shift 없음)
-#      cols_needed에 self.target_col_name 추가하여 eval_df에 포함
 
 from __future__ import annotations
 import warnings
 from typing import Dict, Any, List, Optional
 import pandas as pd
 import numpy as np
-from src.models.base import ModelBase
 import copy
 import scipy.stats as stats
-
+from src.models.base import ModelBase
 
 _VALID_TARGET_TYPES = ("log_close", "log_return_1d")
 
@@ -38,36 +26,24 @@ class WalkForwardTrainer:
         base_price_col: str = "close"
     ):
         """
-        파라미터
-        -------
+        Multi-horizon Walk-Forward 학습을 관리하는 Trainer 클래스.
+
+        Parameters
+        ----------
         target_col_name : str
-            02단계 dataset의 기준 타겟 컬럼명.
-            - log_close    모드: "target_log_close"    (기본값)
-            - log_return_1d 모드: "target_log_return_1d"
-
+            02단계 dataset의 기준 타겟 컬럼명 (예: 'target_log_close', 'target_log_return_1d')
         target_type : str
-            "log_close"     : target_log_close_h{n}(t)     = log(close(t+n))     [기본값, 권장]
-            "log_return_1d" : target_log_return_1d_h{n}(t) = log1p(change_pct(t+n))
-                              당일 등락률의 로그값. shift(-n)으로 t+n 시점의 값을 사용.
-                              역산: close(t+h) = close(t) × exp(Σ pred_h{i}, i=1..h)
-                              ✨ v3.9.1: 사다리꼴 보정 적용
-                              y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
-
-            ❌ "log_return"  : v3.9.0에서 정식 폐기. 사용 불가.
+            'log_close'     : log(close(t+n)) 절대 가격 직접 예측 (기본값)
+            'log_return_1d' : log1p(change_pct(t+n)) 1일 당일 등락률 예측 (v3.9.1 사다리꼴 보정 적용)
         """
         if target_type == "log_return":
             raise ValueError(
-                "[REMOVED v3.9.0] target_type='log_return'은 정식 폐기되었습니다. "
-                "'log_return_1d' (당일 등락률 기반) 또는 'log_close'를 사용하세요.\n"
-                "  log_close     : target_log_close_h{n}(t) = log(close(t+n))\n"
-                "  log_return_1d : target_log_return_1d_h{n}(t) = log1p(change_pct(t+n))"
+                "[REMOVED v3.9.0] 'log_return' 모드는 정식 폐기되었습니다. "
+                "'log_close' 또는 'log_return_1d'를 사용하세요."
             )
 
         if target_type not in _VALID_TARGET_TYPES:
-            raise ValueError(
-                f"target_type은 {_VALID_TARGET_TYPES} 중 하나여야 합니다. "
-                f"받은 값: '{target_type}'"
-            )
+            raise ValueError(f"target_type은 {_VALID_TARGET_TYPES} 중 하나여야 합니다.")
 
         self.model = model
         self.feature_cols = feature_cols
@@ -88,35 +64,15 @@ class WalkForwardTrainer:
         fit_kwargs: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """
-        2-Fold Walk-Forward 학습 실행
+        2-Fold Walk-Forward 학습을 실행합니다. (Look-ahead 편향 방지를 위해 Embargo Gap 자동 적용)
 
-        Embargo gap = max(self.horizons) 자동 계산.
-        horizons 변경 시 gap이 자동으로 연동되므로 별도 설정 불필요.
+        [검증 폴드] 훈련: [0 ~ E-G] / 검증: [E ~ E+V]
+        [테스트 폴드] 훈련: [V ~ E+V-G] / 테스트: [E+V ~ E+V+T]
+        * E: train_end, V/T: valid/test window, G: embargo_gap (max horizons)
 
-        구조 (G = max(horizons)):
-            [검증 폴드]
-              실제 훈련: [0,     E-G]    ← embargo gap만큼 끝을 앞당김
-              embargo:   [E-G,   E]      ← 검증 타겟과 날짜 겹침 구간 제거
-              검증:      [E,     E+V]    ← 윈도우 크기 변화 없음
-
-            [테스트 폴드]
-              실제 훈련: [V,     E+V-G]  ← 동일 구조
-              embargo:   [E+V-G, E+V]
-              테스트:    [E+V,   E+V+T]  ← 윈도우 크기 변화 없음
-
-        E = train_end, V = valid_window_days, T = test_window_days, G = max(horizons)
-
-        반환
-        ----
-        dict with keys:
-            'valid_metrics'     : 검증 폴드 지표 (avg_rmse, avg_ic, per_horizon, samples)
-            'val_predictions'   : 검증 폴드 예측값 DataFrame (앙상블 가중치 최적화용)
-            'test_metrics'      : 테스트 폴드 지표
-            'test_predictions'  : 테스트 폴드 예측값 DataFrame (최종 평가 전용)
-            'final_model'       : 테스트 폴드 학습 모델
-            'target_cols'       : 생성된 타겟 컬럼명 리스트 (04단계 역산에 필요)
-            'target_type'       : 사용된 타겟 타입
-            'embargo_gap_days'  : 적용된 embargo gap (= max(horizons), 거래일)
+        Returns
+        -------
+        Dict[str, Any]: metrics, predictions, final_model 등 평가 및 산출물 딕셔너리
         """
         fit_kwargs = fit_kwargs or {}
 
@@ -332,20 +288,7 @@ class WalkForwardTrainer:
     # ──────────────────────────────────────────────────────────────
 
     def _evaluate(self, eval_df: pd.DataFrame, target_cols: List[str]) -> Dict[str, float]:
-        """Horizon별 RMSE, IC, ICIR 및 평균 지표 계산
-
-        log_return_1d 모드:
-            모델 내부 학습/조기종료는 로그 등락률 스케일로 진행되지만,
-            보고 지표(RMSE/IC)는 로그 종가 스케일로 환산하여 산출.
-
-            ✨ v3.9.1 사다리꼴 보정:
-                y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
-
-                cumsum_h = Σ pred_h{i}, i=1..h   (예측 log return 누적합)
-                Δy(t)    = target_log_return_1d   (현재 시점 실측 log return, 앵커)
-                Δy(t+h)  = pred/true_h            (h시점 예측/실측 log return)
-                y(t)     = target_log_close        (현재 시점 로그 종가, 기준값)
-        """
+        """Horizon별 RMSE, IC, ICIR 및 평균 지표를 계산합니다."""
         if eval_df.empty:
             return {'rms_rmse': np.nan, 'avg_rmse': np.nan, 'avg_ic': np.nan, 'per_horizon': {}, 'samples': 0}
 
@@ -358,26 +301,23 @@ class WalkForwardTrainer:
             temp_eval[f'pred_{col}'] = preds_df[col].values
             temp_eval[f'true_{col}'] = eval_df[col].values
 
-        # ── log_return_1d: 로그 종가 스케일로 변환 (✨ v3.9.1 사다리꼴) ──
+        # ── log_return_1d: 사다리꼴 보정을 통한 로그 종가 스케일 환산 (v3.9.1) ──
         if self.target_type == "log_return_1d" and 'target_log_close' in eval_df.columns:
             log_close_base = eval_df['target_log_close'].values
             sorted_cols    = sorted(target_cols, key=lambda c: int(c.split('_h')[-1]))
-
-            # Δy(t): 현재 시점 실측 log return (사다리꼴 앵커)
-            delta_y_t = eval_df[self.target_col_name].values  # target_log_return_1d
+            delta_y_t      = eval_df[self.target_col_name].values  # 사다리꼴 앵커
 
             for idx, col in enumerate(sorted_cols):
-                # 원래 log return 예측/실측값 (덮어쓰기 전 preds_df, eval_df 직접 참조)
-                pred_delta_h = preds_df[col].values    # Δy(t+h) 예측
-                true_delta_h = eval_df[col].values     # Δy(t+h) 실측
+                pred_delta_h = preds_df[col].values
+                true_delta_h = eval_df[col].values
 
                 cum_pred = sum(preds_df[c].values for c in sorted_cols[:idx + 1])
                 cum_true = sum(eval_df[c].values  for c in sorted_cols[:idx + 1])
 
-                # 사다리꼴: y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
+                # y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
                 temp_eval[f'pred_{col}'] = log_close_base + cum_pred + (delta_y_t - pred_delta_h) / 2
                 temp_eval[f'true_{col}'] = log_close_base + cum_true + (delta_y_t - true_delta_h) / 2
-        # ────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────
 
         per_horizon = {}
         for col in target_cols:
@@ -401,11 +341,7 @@ class WalkForwardTrainer:
             ic_std  = np.std(daily_ics)  if daily_ics else np.nan
             icir    = (ic_mean / ic_std) if (ic_std and ic_std > 0) else np.nan
 
-            per_horizon[col] = {
-                'rmse'   : rmse,
-                'ic_mean': ic_mean,
-                'icir'   : icir
-            }
+            per_horizon[col] = {'rmse': rmse, 'ic_mean': ic_mean, 'icir': icir}
 
         valid_rmses = [v['rmse']    for v in per_horizon.values() if not np.isnan(v['rmse'])]
         valid_ics   = [v['ic_mean'] for v in per_horizon.values() if not np.isnan(v['ic_mean'])]

@@ -1,19 +1,20 @@
 """
-Purpose:
-    - FinanceDataReader를 이용한 KRX 주가 데이터 수집
-    - 종목 마스터(ticker_master), 통합 Parquet, 개별 CSV 다중 저장 지원
-    - 로그 스케일 랜덤 대기를 통한 서버 차단 회피
+Data Collection Engine
 
-Design Principles:
-    - 통합 저장: 파이프라인 효율을 위해 전종목 데이터를 하나의 Parquet으로 병합
-    - 메타 분리: 종목명 등 메타 정보는 별도 마스터 파일로 관리하여 데이터 중복 방지
-    - 유연성: 디버깅을 위한 개별 CSV 저장 옵션 제공
+KRX 주가 데이터 및 종목 마스터 정보를 수집합니다.
 
-✨ H1+H2 패치 (2026-02-08):
-    - ProjectPaths 클래스 사용으로 경로 관리 중앙화
+## 설계 원칙
+- **통합 저장**: 파이프라인 효율을 위해 전 종목 데이터를 단일 Parquet으로 병합
+- **메타 분리**: 종목명 등 메타 정보는 별도 CSV로 관리하여 데이터 중복 방지
+- **유연성**: 디버깅용 개별 CSV 저장 옵션 제공
 
-✨ Fallback 패치:
-    - get_ticker_universe(): FDR 실패 시 data/01_raw/{ref_date}/stock_list.csv 로 대체
+## 안정성
+- **Fallback 메커니즘** (v3.8.1): FDR API 실패 시 로컬 CSV로 대체
+- **Rate Limiting**: 로그 스케일 랜덤 대기로 서버 차단 회피
+
+## 버전
+- v3.8.1: Fallback 강화 (3단계 우선순위)
+- v3.8.0: ProjectPaths 기반 경로 관리 중앙화
 """
 
 import time
@@ -34,20 +35,38 @@ except ImportError:
 
 def get_ticker_universe(reference_date: str) -> List[Tuple[str, str]]:
     """
-    KRX 전체 종목 리스트 조회.
+    KRX 상장 종목 리스트 조회 (3단계 Fallback).
 
-    Fallback 우선순위:
-      1. fdr.StockListing('KRX')  — API 정상 시
-      2. data/01_raw/{reference_date}/stock_list.csv  — API 실패 시
+    우선순위:
+    1. FinanceDataReader API (fdr.StockListing('KRX'))
+    2. 로컬 stock_list.csv (data/01_raw/{reference_date}/)
+    3. 로컬 ticker_master.csv (01단계 수집 산출물)
+
+    Parameters
+    ----------
+    reference_date : str
+        기준일 (YYYYMMDD 형식)
 
     Returns
     -------
     List[Tuple[str, str]]
         (ticker_6digit, name) 튜플 리스트
+        예: [('005930', 'Samsung Electronics'), ...]
+
+    Raises
+    ------
+    RuntimeError
+        모든 Fallback 경로가 실패한 경우
+
+    Notes
+    -----
+    - 종목 코드는 6자리로 패딩됨
+    - API 실패 시 자동으로 다음 경로 시도 (v3.8.1)
+    - 명시적 오류 메시지로 실패 경위 추적 용이
     """
     print(f"🔍 KRX 전체 종목 조회 중 (기준일: {reference_date})...")
 
-    # ── 1순위: FDR API ────────────────────────────────────────────────────
+    # ── 1순위: FDR API (v3.8.1: Fallback 우선순위 명시)
     try:
         all_stocks = fdr.StockListing('KRX')
         ticker_list = [
@@ -60,7 +79,7 @@ def get_ticker_universe(reference_date: str) -> List[Tuple[str, str]]:
     except Exception as e:
         print(f"⚠️ FDR 조회 실패 (오류: {e}).")
 
-    # ── 2순위: 로컬 CSV Fallback ──────────────────────────────────────────
+    # ── 2순위: 로컬 CSV Fallback (v3.8.1)
     fallback_path = Path(f"data/01_raw/{reference_date}/stock_list.csv")
 
     if fallback_path.exists():
@@ -84,24 +103,37 @@ def get_ticker_universe(reference_date: str) -> List[Tuple[str, str]]:
 
 class RawPriceCollector:
     """
-    KRX 원시 데이터 수집 및 다중 포맷 저장 클래스
+    KRX 원시 데이터 수집 및 다중 포맷 저장
 
-    ✨ H1+H2 패치: ProjectPaths 기반 경로 관리
+    OHLCV 데이터를 종목별로 수집하여 다음 세 가지 형태로 저장합니다:
+    - 통합 Parquet (파이프라인 I/O 효율화)
+    - 개별 CSV (디버깅/검증 용이)
+    - 종목 마스터 파일 (메타 정보)
+
+    ProjectPaths 클래스를 통해 경로를 중앙 관리합니다 (v3.8.0~).
     """
 
     def __init__(self, config: Dict[str, Any], paths=None):
         """
+        데이터 수집기 초기화.
+
         Parameters
         ----------
         config : dict
-            config.yaml에서 로드된 설정 딕셔너리
+            config.yaml에서 로드된 설정 딕셔너리.
+            필수 키: project.reference_date, data_collection.*, paths.*
         paths : ProjectPaths, optional
-            경로 객체 (없으면 내부에서 생성)
+            경로 객체. 미제공 시 config에서 자동 생성됨.
+
+        Notes
+        -----
+        - ProjectPaths는 v3.8.0부터 경로 관리를 중앙화함
+        - 저장 디렉토리는 자동 생성됨 (parents=True, exist_ok=True)
         """
         self.cfg = config
         self.ref_date = config['project']['reference_date']
 
-        # ✨ H2 패치: ProjectPaths 사용
+        # v3.8.0: ProjectPaths를 통한 경로 관리
         if paths is None:
             from src.utils.config import ProjectPaths
             self.paths = ProjectPaths.from_config(config)
@@ -122,7 +154,19 @@ class RawPriceCollector:
             self.csv_dir.mkdir(parents=True, exist_ok=True)
 
     def fetch_ohlcv(self, ticker: str) -> pd.DataFrame:
-        """단일 종목 OHLCV 조회 및 표준화"""
+        """
+        단일 종목의 OHLCV 데이터 조회 및 표준화.
+
+        Parameters
+        ----------
+        ticker : str
+            종목 코드 (6자리)
+
+        Returns
+        -------
+        pd.DataFrame
+            표준화된 OHLCV 데이터 (date, open, high, low, close, volume, change_pct, ticker)
+        """
         try:
             start = self.cfg['data_collection']['start_date']
             end = self.cfg['data_collection']['end_date']
@@ -156,9 +200,19 @@ class RawPriceCollector:
 
     def collect_all(self, ticker_list: List[Tuple[str, str]]) -> Dict[str, int]:
         """
-        전체 종목 수집 및 통합 저장 실행
+        전체 종목 수집 및 다중 포맷 저장 실행.
+
+        Parameters
+        ----------
+        ticker_list : List[Tuple[str, str]]
+            (ticker, name) 튜플 리스트
+
+        Returns
+        -------
+        Dict[str, int]
+            수집 통계 (success, failed, empty)
         """
-        # 1. 종목 마스터 파일 저장 (ticker-name 매핑)
+        # 종목 마스터 파일 저장 (ticker-name 매핑)
         df_master = pd.DataFrame(ticker_list, columns=['ticker', 'name'])
         df_master.to_csv(self.master_path, index=False, encoding='utf-8-sig')
         print(f"✅ 종목 마스터 저장 완료: {self.master_path}")
@@ -166,7 +220,7 @@ class RawPriceCollector:
         stats = {'success': 0, 'failed': 0, 'empty': 0}
         all_dfs = []
 
-        # 2. 개별 종목 순회 수집
+        # 개별 종목 순회 수집
         for ticker, name in tqdm(ticker_list, desc="수집 중"):
             df = self.fetch_ohlcv(ticker)
 
@@ -174,23 +228,23 @@ class RawPriceCollector:
                 stats['empty'] += 1
                 continue
 
-            # A. 개별 CSV 저장 (선택 사항)
+            # CSV 저장 (선택 사항)
             if self.cfg['data_collection'].get('save_csv', False):
                 safe_name = name.replace('/', '_').replace('\\', '_')
                 csv_path = self.csv_dir / f"{safe_name}.csv"
                 df.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
-            # B. 통합 Parquet을 위한 리스트 추가
+            # 통합 Parquet을 위한 리스트 추가
             all_dfs.append(df)
             stats['success'] += 1
 
-            # 3. Rate limiting (로그 스케일 랜덤 대기)
+            # Rate limiting (로그 스케일 랜덤 대기)
             min_s = self.cfg['data_collection']['min_sleep']
             max_s = self.cfg['data_collection']['max_sleep']
             wait_time = 10 ** random.uniform(math.log10(min_s), math.log10(max_s))
             time.sleep(wait_time)
 
-        # 4. 통합 Parquet 파일 저장
+        # 통합 Parquet 파일 저장
         if all_dfs:
             print(f"📦 데이터 병합 중... (총 {len(all_dfs)}개 종목)")
             df_total = pd.concat(all_dfs, ignore_index=True)
