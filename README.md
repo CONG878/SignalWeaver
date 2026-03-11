@@ -1,116 +1,103 @@
-﻿# 🚀 SignalWeaver
+# 📈 SignalWeaver (v3.9.1)
 
-SignalWeaver는 한국 주식 시장(KRX) 데이터를 기반으로 단기 및 중장기 주가를 예측하는 **다중 시점 직접 예측(Direct Multi-step Forecasting)** 프레임워크입니다. 
+**SignalWeaver**는 Target-Centric 정렬 방식과 Multi-Horizon Direct Forecasting을 활용하여 미래 주가를 예측하고, 최적의 투자 후보군(Universe)을 선정하는 퀀트 투자 프레임워크입니다.
 
-단순히 다음 날의 주가를 맞추는 것을 넘어, 미래 5일(1주일)의 흐름을 직접 예측하고, **"수익률 중심 정렬 + 하드 필터링"** 전략을 통해 실전 투자 가능한 최적의 유니버스를 선정합니다.
+단순한 가격 예측을 넘어 **수익성, 정확도, 위험도**를 종합적으로 평가하며, 비현실적인 거래를 배제하는 전략적 필터링을 통해 실제 투자 의사결정에 즉시 활용할 수 있는 인사이트를 제공합니다.
 
-## ✨ Key Features
+---
 
-- **Direct Multi-step Forecasting**: 1일 단위 예측의 오차 누적 문제를 해결하기 위해 Horizon별(h1~h5) 독립 모델을 학습하는 직접 예측 방식 채택.
-- **Target-Centric Alignment**: 예측 결과의 날짜가 실제 발생일과 일치하도록 데이터를 정렬($X_{t-h} \rightarrow y_t$)하여 분석 직관성 극대화.
-- **Step-Aligned Architecture**: 파이프라인 단계와 데이터 저장소가 1:1로 매핑되는 직관적인 구조 (`03_training`, `04_forecasts`, `05_universe`).
-- **Centralized Path Management**: `ProjectPaths` 클래스를 통해 모든 경로를 중앙에서 관리하여 유지보수성 및 코드 안정성 확보.
+## ✨ 핵심 기능 (Key Features)
 
-## 🛠️ Tech Stack
+- **Target-Centric Walk-Forward Validation**: 시계열 데이터의 Look-ahead 편향을 원천 차단하기 위해 타겟 시차에 비례하는 Embargo Gap을 자동 적용하며, 시간 흐름에 따른 2-Fold 검증을 수행합니다.
+- **다중 모델 및 동적 앙상블**: `LightGBM`, `RandomForest`, `MLP(다층 퍼셉트론)`를 지원하며, `active_model: "lgbm+rf+mlp"`와 같이 설정 파일에 조합을 명시하면 SLSQP 알고리즘을 통해 최적의 가중치를 자동 산출합니다.
+- **Recursive Extension 예측**: $h_1 \sim h_5$ 예측 결과를 다음 청크(Chunk)의 새로운 기준가로 삼아 미래 기간을 재귀적으로 확장 예측합니다.
+  - **사다리꼴 적분 보정(Trapezoidal Rule)**: 당일 등락률(`log_return_1d`) 모드 사용 시, 이산 데이터의 누적 오차를 최소화하기 위해 사다리꼴 적분 기반의 정밀한 역산을 수행합니다.
+- **Scale-Invariant Feature Engineering**: 절대 가격에 의존하지 않는 무차원 이격도(Disparity), %B, 밴드폭 등의 피처를 구성하여 종목 간 스케일 차이로 인한 왜곡을 방지합니다.
+- **견고한 데이터 수집 (Fallback System)**: 외부 API(FDR) 장애 시 로컬 백업 CSV를 자동으로 파싱하여 파이프라인의 중단을 방지합니다.
 
-- **Data**: FinanceDataReader, KRX Stock Data
-- **Model**: LightGBM (Multi-output Regressor)
-- **Processing**: Pandas, NumPy (Vectorized Operations)
-- **Environment**: Python 3.10+ / Jupyter Notebook
+---
 
-## 📂 Project Structure
+## 🔄 파이프라인 아키텍처 (Pipeline Flow)
 
-```bash
-SignalWeaver/
-├── config/                   # 통합 설정 파일
-│   └── config.yaml              # 프로젝트 전체 파라미터 (경로, 모델 하이퍼파라미터)
-├── data/                     # 데이터 저장소 (날짜별 격리)
-│   ├── 01_raw/{YYYYMMDD}/       # Step 1: 원천 데이터 (Parquet + CSV)
-│   ├── 02_processed/{YYYYMMDD}/ # Step 2: Feature + Target 데이터셋
-│   ├── 03_training/{YYYYMMDD}/  # Step 3: 모델 아티팩트(.pkl) + 검증용 과거 예측
-│   ├── 04_forecasts/{YYYYMMDD}/ # Step 4: 미래(Next 5 days) 예측 결과
-│   └── 05_universe/{YYYYMMDD}/  # Step 5: 최종 선정된 후보군 및 리포트
-├── src/                      # 소스 코드 모듈
-│   ├── data_loader/             # 데이터 수집 (Collector)
-│   ├── features/                # 피처 엔지니어링 (Builder, Technical)
-│   ├── modeling/                # 학습 루프 (Trainer)
-│   ├── models/                  # 모델 래퍼 (LGBM)
-│   ├── universe/                # 유니버스 선정 로직 (Selector)
-│   └── utils/                   # 유틸리티 (Config, Path, Filter, Risk)
-├── 01_collect_data.ipynb     # Step 1: 데이터 수집
-├── 02_build_dataset.ipynb    # Step 2: 전처리 + Feature 생성
-├── 03_train_predict.ipynb    # Step 3: 모델 학습 및 검증
-├── 04_forecast_future.ipynb  # Step 4: 미래 예측 (Inference)
-└── 05_universe_selection.ipynb # Step 5: 최종 유니버스 선정
+SignalWeaver는 데이터 수집부터 최종 투자 리포트 생성까지 독립적인 단계(Step)로 구성되어 있습니다.
+
+```text
+[데이터 수집 및 전처리]
+ 98_save_macro_data     : 글로벌 거시 경제 지표 및 Market Regime 수집 (CSV Fallback 지원)
+  └─ 97_forecast_macro  : 매크로 지표의 미래값 추정 (Recursive Extension 대비)
+      └─ 01_collect_data: KRX 전 종목 주가 및 거래량 데이터 수집
+          └─ 02_build_dataset: Scale-Invariant 기술적 지표 및 유동성/리스크 메타 생성
+
+[모델 학습 및 예측]
+ 03_train_predict       : Target-Centric Walk-Forward 단일 모델 학습 (h1~h5 동시 학습)
+  └─ 03b_train_ensemble : (선택) 검증 폴드 예측값을 활용한 앙상블 가중치 최적화
+      └─ 04_forecast_future: 사다리꼴 보정 기반 Recursive Extension 미래 주가 예측
+
+[투자 유니버스 선정]
+ 05_universe_selection  : 예측 정확도(IC/RMSE), 기대 수익률(최적 보유기간), 위험도 종합 평가
+                          (Facade Pattern을 통한 평가 로직 캡슐화 및 상세 Excel/CSV 리포트 출력)
 
 ```
 
-## 🚀 Quick Start
+---
 
-1. `config/config.yaml`에서 프로젝트 기준일(`reference_date`) 설정.
-2. `01` ~ `05` 단계 노트북을 순차적으로 실행.
-3. `data/05_universe/{date}/investment_report.xlsx`를 열어 투자 종목 최종 선별.
+## 📂 디렉토리 구조 (Directory Structure)
+
+```text
+SignalWeaver/
+├── config/
+│   └── config.yaml          # 프로젝트 전역 설정 (파라미터, 모델, 경로)
+├── data/                    # 파이프라인 단계별 산출물 보관
+│   ├── 01_raw/              # 수집된 원시 파켓 및 CSV
+│   ├── 02_processed/        # 피처 엔지니어링 완료 데이터셋
+│   ├── 03_training/         # 학습 모델 아티팩트 및 검증/테스트 예측 결과
+│   ├── 04_forecasts/        # 미래 재귀 예측 결과
+│   ├── 05_universe/         # 최종 투자 후보군 및 Excel 리포트
+│   └── 99_meta/             # 매크로 지표, 달력, KOSPI 마스터 백업
+├── docs/                    # 스키마 및 체인지로그 문서 (v3.9.1)
+├── src/
+│   ├── data_loader/         # API 수집 및 Fallback 모듈
+│   ├── features/            # 기술적 지표 및 메타 빌더
+│   ├── modeling/            # WalkForwardTrainer 모듈
+│   ├── models/              # LGBM, RF, MLP 및 Ensemble 구현체
+│   ├── universe/            # 수익률/위험도 평가 및 필터링 (Facade)
+│   └── utils/               # 거래 전략, 최적화, 경로 관리 (ProjectPaths)
+└── *.ipynb                  # 단계별 실행 노트북
+
+```
 
 ---
 
-## 🔧 Pipeline Steps
+## 🚀 빠른 시작 (Quick Start)
 
-### **Step 1: 원시 데이터 수집** (`01_collect_data.ipynb`)
+**1. 환경 설정**
+필요한 라이브러리를 설치합니다. (Python 3.10+ 권장)
 
-* **역할**: KRX 전 종목 시세 수집, 종목 마스터 생성
-* **출력**: `data/01_raw/{date}/krx_prices_{date}.parquet`
+```bash
+pip install -r requirements.txt
 
-### **Step 2: 데이터셋 구축** (`02_build_dataset.ipynb`)
+```
 
-* **역할**: 기술적 지표 계산, 메타 지표(유동성, 리스크) 생성, Target 정의
-* **출력**: `data/02_processed/{date}/dataset.parquet`
+**2. 설정 파일 확인 (`config/config.yaml`)**
+예측 타겟 모드(`log_close` 또는 `log_return_1d`), 활성화 모델(`active_model`), 전략 수익률 상한(`max_daily_return`) 등을 설정합니다.
 
-### **Step 3: Multi-Horizon 학습 및 검증** (`03_train_predict.ipynb`)
-
-* **역할**: Horizon(1~5일)별 독립 모델 학습 및 Walk-Forward Validation 수행
-* **특징**: 모델과 검증 결과를 하나의 폴더(`03_training`)에서 통합 관리
-* **출력**:
-* `data/03_training/{date}/lightgbm_multi.pkl` (학습된 모델)
-* `data/03_training/{date}/predictions.parquet` (과거 검증 예측값)
-
-
-
-### **Step 4: 미래 예측** (`04_forecast_future.ipynb`)
-
-* **역할**: 학습된 모델로 "아직 오지 않은 미래 5일"의 주가 경로 예측
-* **특징**: 검증 데이터와 분리된 전용 폴더(`04_forecasts`) 사용
-* **출력**: `data/04_forecasts/{date}/future_forecasts.parquet`
-
-### **Step 5: 유니버스 선정** (`05_universe_selection.ipynb`)
-
-* **역할**: 예측된 수익률과 리스크를 종합하여 **최종 투자 후보군(Top-K)** 선정
-* **전략**:
-1. **Hard Filtering**: 거래정지/상폐, 초저유동성, 작전주, 동전주(Penny Stock) 물리적 제거.
-2. **Log-Space Ranking**: `daily_log_return` 기준으로 정렬 (연산 효율 최적화).
-3. **Reporting**: 수익률, 정확도, 리스크 점수가 포함된 리포트 생성.
-
-
-* **출력**:
-* `data/05_universe/{date}/universe_candidates.parquet` (시스템용 후보군)
-* `data/05_universe/{date}/investment_report.xlsx` (투자자용 리포트)
-
-
+**3. 파이프라인 실행**
+번호가 매겨진 Jupyter Notebook을 순서대로 실행합니다. 각 노트북은 이전 단계의 산출물(`.parquet`)을 자동으로 로드하여 작업을 수행합니다. 최종적으로 `05_universe_selection.ipynb`를 실행하면 `data/05_universe/` 디렉토리에 투자 의사결정을 위한 상세 엑셀 리포트가 생성됩니다.
 
 ---
 
-## 📊 Data Policy & Filters
+## 📊 주요 설정 안내 (`config.yaml`)
 
-* **Target**: `log(close)` (로그 종가)
-* **Hard Filters**:
-* **Tradability**: 거래정지/상장폐지 종목 제외
-* **Liquidity**: 20일 평균 거래대금 5천만 원 미만 제외
-* **Price**: 예측가 1,000원 미만(동전주) 제외 (Log-space comparison 적용)
-* **Manipulation**: 20일 내 100% 이상 급등 + 거래량 5배 폭증 종목 제외
+* **`target_type`**:
+* `"log_close"` (기본값): 종가의 로그값을 직접 예측합니다.
+* `"log_return_1d"`: 당일 등락률을 예측하며, 역산 시 누적 오차 방지를 위해 사다리꼴 적분 공식이 적용됩니다.
 
 
+* **`active_model`**: `"lgbm"`, `"rf"`, `"mlp"` 등의 단일 모델 약칭 또는 `"lgbm+rf"` 형식의 앙상블 조합을 지원합니다.
+* **`strategy.max_daily_return`**: 일평균 기대 수익률이 상한(예: 0.16 = 16%)을 초과하는 비현실적인 급등 예측을 자동 제외하고 차선책을 찾습니다.
 
-## 🔜 Next Steps
+---
 
-* **Step 6**: Portfolio Optimization (MVO, Risk Parity)
+**Maintained by**: SignalWeaver Team
 
-* **Step 7**: Backtesting & Simulation
+**Schema Version**: 3.9.1 (Stable)
