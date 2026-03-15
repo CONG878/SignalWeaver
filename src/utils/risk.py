@@ -6,6 +6,9 @@ Risk assessment utilities
 - 시계열 데이터만으로 계산 가능
 
 ✨ H4 패치 (2026-02-09): 로그/지수 연산 효율화
+✨ v3.9.2 패치 (2026-03-16): 위험도 지표 정의 통일
+- calculate_composite_risk_score(): kurtosis_pos 제거 → var_abs 추가
+- 기획서 5대 표준 지표(Volatility/Downside Risk/VaR/CVaR/MDD) 기준으로 정합
 - Drawdown 계산 최적화 (로그 공간 직접 계산)
 - Skewness/Kurtosis 통합 계산 (표준화 1회)
 - VaR/CVaR 통합 계산 (정렬 1회)
@@ -175,14 +178,15 @@ def calculate_composite_risk_score(risk_metrics: Dict[str, float]) -> float:
         
     Notes
     -----
-    가중치 설계:
+    가중치 설계 (기획서 5대 표준 지표 기준):
     - Volatility (30%): 기본 변동성
     - Downside Risk (25%): 하방 위험 (투자자가 민감)
-    - CVaR (20%): 극단 손실
-    - MDD (15%): 심리적 타격
-    - Kurtosis (10%): Fat Tail 위험
+    - VaR (20%): 분위수 기반 손실 위험  ← Kurtosis 대체 (v3.9.2)
+    - CVaR (15%): 극단 손실 (VaR 초과 구간 평균)
+    - MDD (10%): 심리적 타격
     
-    Skewness는 방향성이므로 별도 처리
+    Skewness와 Kurtosis는 calculate_risk_metrics()에서 계속 계산되며
+    개별 컬럼으로 리포트에 노출됩니다. 복합 점수에는 미포함.
     """
     # NaN 체크
     if any(np.isnan(v) for v in risk_metrics.values()):
@@ -195,18 +199,19 @@ def calculate_composite_risk_score(risk_metrics: Dict[str, float]) -> float:
     components = {
         'volatility': risk_metrics['volatility'],
         'downside_risk': risk_metrics['downside_risk'],
-        'cvar_abs': abs(risk_metrics['cvar_95']),  # 음수이므로 절댓값
+        'var_abs': abs(risk_metrics['var_95']),    # 음수이므로 절댓값 (VaR)
+        'cvar_abs': abs(risk_metrics['cvar_95']),  # 음수이므로 절댓값 (CVaR)
         'mdd_abs': abs(risk_metrics['max_drawdown']),  # 음수이므로 절댓값
-        'kurtosis_pos': max(risk_metrics['kurtosis'], 0)  # 양수만 (Fat Tail)
     }
     
     # 가중 평균 (정규화 전 원점수)
+    # 기획서 5대 표준 지표: Volatility / Downside Risk / VaR / CVaR / MDD
     weights = {
         'volatility': 0.30,
         'downside_risk': 0.25,
-        'cvar_abs': 0.20,
-        'mdd_abs': 0.15,
-        'kurtosis_pos': 0.10
+        'var_abs': 0.20,
+        'cvar_abs': 0.15,
+        'mdd_abs': 0.10
     }
     
     raw_score = sum(components[k] * weights[k] for k in weights.keys())

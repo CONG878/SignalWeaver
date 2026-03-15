@@ -1,9 +1,67 @@
-﻿# Schema Changelog (Updated v3.9.1)
+﻿# Schema Changelog (Updated v3.9.2)
 
 All notable changes to the data schema will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [3.9.2] - 2026-03-16
+
+### 🔵 PATCH Changes — 코드·문서 정합성 패치 (스키마 변경 없음)
+
+변경 범위: **02단계, 03단계, 05단계, 99단계, src/utils/risk.py, src/models/artifact.py**  
+산출물 스키마 변경 없음. 기존 parquet·모델 파일 재실행 불필요.
+
+---
+
+#### 1. 위험도 지표 정의 통일 (`src/utils/risk.py`)
+
+**배경:** 기획서의 5대 표준 지표(Volatility/Downside Risk/VaR/CVaR/MDD)와 달리
+`calculate_composite_risk_score()`에 VaR 대신 Kurtosis가 포함되어 있었습니다.
+
+**수정 내용:**
+- `kurtosis_pos` (0.10) 제거 → `var_abs` (0.20) 추가
+- 연쇄 조정: `cvar_abs` 0.20→0.15, `mdd_abs` 0.15→0.10 (합계 1.00 유지)
+
+#### 2. 인간 검수 리포트 개편 (`05_universe_selection.ipynb`)
+
+**배경:** `risk_composite_raw` 단일 점수가 5개 지표를 압축하여 정보 손실을 유발했습니다.
+
+**수정 내용:**
+- `리스크점수` 컬럼 제거
+- `하방위험`, `VaR(95%)`, `CVaR(95%)` 개별 컬럼 추가
+- Excel Sheet 3 위험등급 분류 기준: `리스크점수` → `변동성` 분위수(4구간)
+
+#### 3. `filter_statistics.json` 저장 누락 수정 (`05_universe_selection.ipynb`)
+
+**배경:** `ProjectPaths.get_filter_statistics()` 경로가 정의되어 있으나 저장 코드가 없었습니다.
+
+**수정 내용:** 저장 셀(5️⃣)에 `json.dump(filter_stats, ...)` 블록 추가
+
+#### 4. `99_save_trading_days` 가드 제거 및 경고 억제 (`99_save_trading_days.ipynb`)
+
+**배경:** `.ipynb`에서 `if __name__ == "__main__"` 블록은 가드 역할을 하지 못하며,
+`pandas_market_calendars`의 `break_start`/`break_end` discontinued 경고가 매 실행 시 출력되었습니다.
+
+**수정 내용:**
+- `if __name__` 블록 제거, `update_market_calendar()` 호출을 독립 셀로 분리
+- `get_calendar()` 호출을 `warnings.catch_warnings()` 컨텍스트로 감싸 경고 억제
+
+#### 5. 수동 배치 파일 명시 (`02_build_dataset.ipynb`)
+
+**배경:** Fallback 2순위가 참조하는 `stock_list.csv`가 자동 생성되지 않는다는 사실이 미기록 상태였습니다.
+
+**수정 내용:** Fallback 설명 셀에 수동 준비 안내 및 코드 예시 추가
+
+#### 6. `param_hash` 문서화 (`src/models/artifact.py`, `03_train_predict.ipynb`)
+
+**배경:** `metadata`에 `hyperparameters` 키 누락 시 모든 모델 hash가 동일해지는 잠재 버그가 있었습니다.
+
+**수정 내용:**
+- `save_model_artifact()` docstring에 `Notes` 섹션 추가 (hash 충돌 위험 명시)
+- `03_train_predict.ipynb` 호출부에 `"hyperparameters"` 키 명시 추가
 
 ---
 
@@ -182,6 +240,7 @@ FDR API 장애 시 파이프라인 전체가 중단되는 현상을 방지하기
 
 | Version | Date | Type | 주요 변경 사항 |
 |---------|------|------|----------------|
+| **3.9.2** | 2026-03-16 | 🔵 PATCH | 위험도 지표 통일 + 리포트 개편 + 필터 통계 저장 + 노트북 구조·문서화 |
 | **3.9.1** | 2026-03-09 | 🔵 PATCH | log_return_1d 역산: 사다리꼴 적분 보정 (오차 감소) |
 | **3.9.0** | 2026-03-09 | 🟢 MINOR | log_return_1d 타겟 신규 추가 + log_return 정식 폐기 |
 | **3.8.1** | 2026-03-05 | 🔵 PATCH | API Fallback 강화 및 datetime 타입 버그 수정 |
@@ -195,7 +254,7 @@ FDR API 장애 시 파이프라인 전체가 중단되는 현상을 방지하기
 
 ---
 
-**Last Updated**: 2026-03-09
-**Schema Version**: 3.9.1
+**Last Updated**: 2026-03-16
+**Schema Version**: 3.9.2
 **Status**: ✅ Stable
 **Maintained by**: SignalWeaver Team

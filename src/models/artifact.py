@@ -9,6 +9,8 @@ Design scope (현재 단계):
     - MLflow 등 외부 시스템 도입 전의 경량 구현
 
 ✨ H1+H2 패치 (2026-02-08):
+✨ v3.9.2 패치 (2026-03-16): param_hash 문서화
+- save_model_artifact() Notes 섹션: hyperparameters 키 누락 시 hash 충돌 경고 추가
     - ProjectPaths 클래스 사용
     - 중복 경로 문제 해결: model_dir/{model_name}/ 구조에서
       model_dir이 이미 {model_name}을 포함한 경우 중복 방지
@@ -84,6 +86,26 @@ def save_model_artifact(
     -------
     Path
         저장된 파일 경로
+
+    Notes
+    -----
+    **param_hash 생성 규칙**
+    파일명의 `{param_hash}`는 ``metadata.get("hyperparameters", {})``를
+    MD5 해싱하여 생성합니다 (앞 8자리).
+
+    .. warning::
+        호출 시 ``metadata``에 ``hyperparameters`` 키가 없으면
+        빈 dict ``{}``가 해싱되어 **모든 모델의 hash가 동일**해집니다.
+        이 경우 ``registry.json``에서 모델을 구분할 수 없게 됩니다.
+        반드시 아래와 같이 명시적으로 전달하십시오.
+
+        >>> save_model_artifact(
+        ...     metadata={
+        ...         "test_metrics": ...,
+        ...         "target_columns": ...,
+        ...         "hyperparameters": train_cfg.get("lgbm_params", {}),  # 필수
+        ...     }
+        ... )
     """
     if model_dir is None:
         model_dir = DEFAULT_MODEL_DIR / model_name
