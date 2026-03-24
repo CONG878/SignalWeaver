@@ -1,9 +1,82 @@
-﻿# Schema Changelog (Updated v3.9.2)
+# Schema Changelog (Updated v3.10.0)
 
 All notable changes to the data schema will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [3.10.0] - 2026-03-16
+
+### 🟢 MINOR Changes — 사다리꼴 모듈화 + pred_log_return 스키마 분리 + 앙상블 버그 수정
+
+변경 범위: **02단계, 03단계, 03b단계, 04단계, 05단계, src/features/builder.py, src/modeling/trainer.py, src/universe/select_universe.py**  
+신규 파일: **src/utils/trapezoidal.py**  
+02단계 스키마 변경 있음 (feature_risk_composite 추가). 전체 재실행 필요.
+
+---
+
+#### 1. `src/utils/trapezoidal.py` 신설 — 사다리꼴 적분 모듈화
+
+**배경:** v3.9.1에서 도입된 사다리꼴 역산 수식이 03단계 Trainer 내부(`_evaluate`), 03단계 노트북 finalize 셀, 04단계 Recursive Extension 루프, 05단계 `evaluate_model_accuracy()` 네 곳에 중복 정의되어 있었습니다. 수식 변경 시 네 곳을 동시에 수정해야 하는 유지보수 리스크가 있었습니다.
+
+**수정 내용:**
+- `src/utils/trapezoidal.py` 신설. `trapezoid_log_close(log_close_base, cum_pred, delta_y_t, delta_y_h)` 함수 정의.
+- numpy 브로드캐스팅을 활용하므로 scalar, array, Series 모두 동일하게 처리.
+- 중복 수식이 있던 네 곳 모두 이 함수 호출로 교체.
+
+#### 2. 03b단계 `log_return_1d` 타겟 미인식 버그 수정
+
+**배경:** v3.9.0에서 `log_return_1d` 타겟이 신설되었으나, `03b_train_ensemble.ipynb`의 `target_prefix` 결정 로직이 `target_type`과 무관하게 `'pred_target_log_close_h'`로 하드코딩되어 있었습니다. `log_return_1d` 모드로 학습한 단일 모델의 `val_predictions.parquet`를 읽으면 `pred_cols`가 빈 리스트가 되고, 이후 최적화가 의미 없는 결과를 반환했습니다.
+
+**수정 내용:**
+- `target_prefix`를 `target_type`에 따라 동적으로 결정:
+  - `log_return_1d` → `'pred_target_log_return_1d_h'`
+  - `log_close`     → `'pred_target_log_close_h'`
+- `pred_cols`가 빈 리스트인 경우 명시적 `KeyError` 발생 및 진단 메시지 출력.
+
+#### 3. 03b단계 `base_canonical` 취약점 수정
+
+**배경:** 앙상블 예측 결과를 저장할 때 첫 번째 구성 모델의 DataFrame을 통째로 `copy()` 후 `pred_` 컬럼만 덮어쓰는 방식을 사용했습니다. 구성 모델 순서가 바뀌거나 단일 모델 간 스키마가 달라질 경우, 05단계에서 잘못된 메타값(`fold`, `close`, `target_*` 등)을 조용히 참조할 수 있었습니다.
+
+**수정 내용:**
+- `_build_ensemble_df()` 헬퍼 함수를 신설. `date`, `ticker`, `fold`, `true_*` 컬럼만 명시적으로 추출해 새 DataFrame을 구성하고 `pred_` 컬럼을 직접 채움.
+- val과 test 두 곳 모두 동일하게 적용.
+
+#### 4. `pred_log_return` 스키마 분리 (`04_forecast_future.ipynb`)
+
+**배경:** `future_forecasts.parquet`에 `log_return_1d` 모드의 raw 예측값인 `pred_log_return`이 "참고용"으로 포함되어 있었습니다. 공식 산출 스키마에 디버깅용 컬럼이 혼재하면 05단계 등 하위 스텝에서 실수로 이 컬럼을 참조할 위험이 있었습니다.
+
+**수정 내용:**
+- 04단계 예측 루프의 `row` 딕셔너리 구성에서 `pred_log_return` 키를 기본 제거.
+- `config.yaml`에 `debug.save_raw_predictions: true` 플래그를 추가하면 필요 시에만 포함되도록 분리.
+- `future_forecasts.parquet` 공식 스키마: `date`, `ticker`, `horizon`, `chunk_idx`, `pred_log_close`, `pred_close`.
+
+#### 5. `risk_composite` 역할 분리 (`src/features/builder.py`, `04_forecast_future.ipynb`)
+
+**배경:** `risk_composite`가 모델 학습 피처와 Universe 선정 운영 메타의 두 역할을 `feature_` 접두사 없이 겸하고 있었습니다. 03단계 `feature_cols` 정의에서 `or c in ['risk_composite']` 예외 처리가 필요했으며, 이는 개발 초기 잔재였습니다.
+
+**수정 내용:**
+- `build_universe_meta()`에서 동일한 값으로 두 컬럼을 명시적으로 생성: `feature_risk_composite`(모델 학습 피처, `feature_` 접두사), `risk_composite`(운영 메타, 접두사 없음, Universe 선정 전용).
+- `04_forecast_future.ipynb`의 `calculate_features_for_ticker()`도 동일하게 적용.
+- `03_train_predict.ipynb`의 `feature_cols` 정의에서 `or c in ['risk_composite']` 예외 제거.
+
+#### 6. Directional Accuracy 추가 (`src/universe/select_universe.py`, `05_universe_selection.ipynb`)
+
+**배경:** 기획서 8.2에 명시된 방향성 예측 정확도가 미구현 상태였습니다.
+
+**수정 내용:**
+- `evaluate_model_accuracy()`에서 종목별 `directional_accuracy` 산출. 인접 시점 간 방향 일치율(`sign(pred 변화) == sign(true 변화)`).
+- `investment_report.xlsx`의 정확도 섹션에 `방향성정확도` 컬럼 추가.
+
+#### 7. Top-k Precision 추가 (`05_universe_selection.ipynb`)
+
+**배경:** 기획서 8.2에 명시된 상위 추천 종목의 실현 수익 비율 지표가 미구현 상태였습니다.
+
+**수정 내용:**
+- 05단계 노트북에 6️⃣번 셀 신설. `test_predictions.parquet`만으로 계산 가능하므로 추가 데이터 수집 불필요.
+- K=10, 20, 50, 100, 전체 후보 각각에 대해 Precision과 무작위 선택 기준선을 함께 출력.
 
 ---
 
@@ -36,14 +109,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### 3. `filter_statistics.json` 저장 누락 수정 (`05_universe_selection.ipynb`)
 
-**배경:** `ProjectPaths.get_filter_statistics()` 경로가 정의되어 있으나 저장 코드가 없었습니다.
-
 **수정 내용:** 저장 셀(5️⃣)에 `json.dump(filter_stats, ...)` 블록 추가
 
-#### 4. `99_save_trading_days` 가드 제거 및 경고 억제 (`99_save_trading_days.ipynb`)
-
-**배경:** `.ipynb`에서 `if __name__ == "__main__"` 블록은 가드 역할을 하지 못하며,
-`pandas_market_calendars`의 `break_start`/`break_end` discontinued 경고가 매 실행 시 출력되었습니다.
+#### 4. `99_save_trading_days` 가드 제거 및 경고 억제
 
 **수정 내용:**
 - `if __name__` 블록 제거, `update_market_calendar()` 호출을 독립 셀로 분리
@@ -51,13 +119,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### 5. 수동 배치 파일 명시 (`02_build_dataset.ipynb`)
 
-**배경:** Fallback 2순위가 참조하는 `stock_list.csv`가 자동 생성되지 않는다는 사실이 미기록 상태였습니다.
-
 **수정 내용:** Fallback 설명 셀에 수동 준비 안내 및 코드 예시 추가
 
 #### 6. `param_hash` 문서화 (`src/models/artifact.py`, `03_train_predict.ipynb`)
-
-**배경:** `metadata`에 `hyperparameters` 키 누락 시 모든 모델 hash가 동일해지는 잠재 버그가 있었습니다.
 
 **수정 내용:**
 - `save_model_artifact()` docstring에 `Notes` 섹션 추가 (hash 충돌 위험 명시)
@@ -70,18 +134,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 🔵 PATCH Changes — log_return_1d 역산 보정 (사다리꼴 적분)
 
 변경 범위: **04단계 (Forecasts), 05단계 (Universe)**
-01~03단계 스키마 및 산출물 변경 없음.
-
----
 
 #### 1. log_return_1d 역산 로직 개선
 
-**배경:**
-v3.9.0에서 도입된 `log_return_1d` 모드의 단순 누적(cumsum) 방식은 이산 데이터의 특성상 오차가 발생하기 쉽습니다. 이를 보정하기 위해 사다리꼴 적분(Trapezoidal Rule) 근사법을 도입합니다.
-
 **수정 내용:**
 - **역산 공식 변경**: `y(t+k) = y(t) + ΣΔy_i + (Δy(t) - Δy(t+k))/2`
-- **앵커 컬럼 추가**: 사다리꼴 보정의 앵커가 되는 `Δy(t)`(당일 실측 등락률)를 `log_close_ref`에 포함하여 05단계에 전달하도록 수정하였습니다.
+- **앵커 컬럼 추가**: 사다리꼴 보정의 앵커가 되는 `Δy(t)`를 `log_close_ref`에 포함하여 05단계에 전달.
 
 ---
 
@@ -90,24 +148,13 @@ v3.9.0에서 도입된 `log_return_1d` 모드의 단순 누적(cumsum) 방식은
 ### 🟢 MINOR Changes — log_return_1d 타겟 도입 및 log_return 폐기
 
 변경 범위: **02단계 (Feature), 03단계 (Training), 04단계 (Forecasts), 05단계 (Universe)**
-01단계 스키마 변경 없음.
-
----
 
 #### 1. log_return_1d 모드 신설 및 타겟 스키마 변경
 
-**배경:**
-기존 누적 수익률 방식의 불안정성을 해소하기 위해 1일 단위 등락률(`log1p(change_pct)`)을 직접 예측하는 모드를 추가합니다.
-
 **수정 내용:**
 - **신규 타겟**: `target_log_return_1d_h{n}` (v3.9.0 신규).
-- **정식 폐기**: 이전 버전에서 deprecated 되었던 `target_log_return_h{n}` (누적 로그 수익률) 타겟을 물리적으로 삭제하였습니다.
-- **보고 지표 스케일 통일**: 모델이 예측한 raw log return 스케일 그대로 `val/test_predictions.parquet`에 저장하되, 평가 시 변환 과정을 거치도록 구조를 개선했습니다.
-
-#### 2. 모델 평가 함수 시그니처 확장
-
-**수정 내용:**
-- `evaluate_model_accuracy()` 및 `select_investment_universe()`에 `target_columns` 및 `log_close_ref` 인자를 추가하여 모드별 가변적인 평가 기준을 지원합니다.
+- **정식 폐기**: `target_log_return_h{n}` (누적 로그 수익률) 물리적 삭제.
+- **보고 지표 스케일 통일**: raw log return 스케일 그대로 저장, 평가 시 변환.
 
 ---
 
@@ -115,110 +162,65 @@ v3.9.0에서 도입된 `log_return_1d` 모드의 단순 누적(cumsum) 방식은
 
 ### 🔵 PATCH Changes — API Fallback 및 datetime 타입 버그 수정
 
-변경 범위: **98단계, 02단계, 04단계, src/data_loader/collector.py**
-01, 03, 05단계 스키마 변경 없음.
-
----
-
-#### 1. 매크로 및 종목 리스트 수집 Fallback 강화
-
-**배경:**
-FDR API 장애 시 파이프라인 전체가 중단되는 현상을 방지하기 위해 로컬 CSV 대체 경로를 확보했습니다.
-
-**수정 내용:**
-- **매크로 지표 (98단계)**: API 실패 시 `data/99_meta/{indicator}.csv`에서 데이터를 복구하는 헬퍼 셀을 추가했습니다.
-- **코스피 판별 (02단계)**: `StockListing` 실패 시 로컬 `stock_list.csv` 또는 `ticker_master`를 참조하는 3단계 Fallback 체계를 구축했습니다.
-
-#### 2. 04단계 numpy.datetime64 속성 오류 수정
-
-**배경:**
-미래 날짜 생성 시 `values` 속성 사용으로 인해 데이터 타입이 `numpy.datetime64`로 고정되어 `.weekday()` 메서드 호출 시 `AttributeError`가 발생하는 버그를 수정했습니다.
-
-**수정 내용:**
-- `future_dates` 생성 시 `.values`를 제거하고 `pd.Series` 타입을 유지하여 인덱싱 결과가 항상 `pd.Timestamp`가 되도록 보장하였습니다.
-
 ---
 
 ## [3.8.0] - 2026-02-28
 
 ### 🟢 MINOR Changes — MLP 모델 도입 및 앙상블 확장성
 
-변경 범위: **03단계 (Training), 03b단계 (Ensemble), 04단계 (Forecasts), src/utils, src/models**
-01, 02, 05단계 스키마 변경 없음.
-
----
-
-#### 1. MLP Multi-output 모델 신설
-- **내용**: PyTorch 기반의 단일 네트워크로 h1~h5를 동시 출력하는 `MLPModel`을 도입했습니다.
-
-#### 2. 앙상블 확장성 — 모델 조합 동적 지정
-- **내용**: `active_model`에 `lgbm+rf+mlp`와 같이 `+` 구분자를 사용하여 임의의 조합을 지정하고 SLSQP로 가중치를 최적화하도록 개선했습니다.
-
-#### 3. 04단계 예측 실패 종목 건너뜀
-- **내용**: 특정 종목의 피처 오류(`inf` 등) 발생 시 전체 중단 대신 해당 종목만 `skipped_tickers`에 기록하고 다음 종목으로 진행하도록 예외 처리를 추가했습니다.
-
 ---
 
 ## [3.7.2] - 2026-02-25
 
 ### 🔵 PATCH Changes — 비현실적 수익률 거래 필터링
-- **내용**: `strategy.max_daily_return` 설정을 도입하여 일평균 수익률 상한을 초과하는 급등주 거래를 투자 후보에서 제외합니다.
 
 ---
 
 ## [3.7.1] - 2026-02-24
 
 ### 🔵 PATCH Changes — 04단계 버그 수정 및 97단계 신설
-- **내용**: 04단계 피처 스키마를 v3.6.0에 맞게 동기화하고, 매크로 지표 미래값 추정(97단계) 결과를 Recursive Extension에 반영하도록 수정했습니다.
 
 ---
 
 ## [3.7.0] - 2026-02-22
 
 ### 🟢 MINOR Changes - log_close 롤백 + Embargo Gap
-- **내용**: 타겟을 `log_close`로 롤백하고, look-ahead 편향 방지를 위한 Embargo Gap 로직을 `WalkForwardTrainer`에 도입했습니다.
 
 ---
 
 ## [3.6.0] - 2026-02-21
 
 ### 🟢 MINOR Changes - Scale-Invariant Features & IC Evaluation
-- **내용**: 이격도/무차원 지표 중심의 피처 개편, 매크로 피처 통합(98단계), IC/ICIR 지표 기반 평가 및 가중치 최적화 체계를 수립했습니다.
 
 ---
 
 ## [3.5.0] - 2026-02-20
 
 ### 🟢 MINOR Changes - Training Pipeline Improvement
-- **내용**: 2-Fold Walk-Forward 구조를 도입하여 검증셋과 테스트셋을 물리적으로 분리했습니다.
 
 ---
 
 ## [3.4.0] - 2026-02-17
 
 ### 🟢 MINOR Changes - Model Diversification
-- **내용**: RandomForest 멀티아웃풋 모델 및 앙상블 학습 단계를 추가했습니다.
 
 ---
 
 ## [3.3.0] - 2026-02-09
 
 ### 🟢 MINOR Changes - Infrastructure Modernization
-- **내용**: 단계별 독립 폴더 구조 및 `ProjectPaths`를 통한 경로 관리 중앙화를 실시했습니다.
 
 ---
 
 ## [3.2.1] - 2026-02-09
 
 ### 🔵 PATCH Changes
-- **내용**: Multi-Horizon 버그 수정 및 유동성 점수 산출 방식(최근 20일 평균)을 개선했습니다.
 
 ---
 
 ## [3.2.0] - 2026-02-07
 
 ### 🟢 MINOR Changes
-- **내용**: 04단계(미래 예측) 및 05단계(유니버스 선정) 기능을 추가했습니다.
 
 ---
 
@@ -240,6 +242,7 @@ FDR API 장애 시 파이프라인 전체가 중단되는 현상을 방지하기
 
 | Version | Date | Type | 주요 변경 사항 |
 |---------|------|------|----------------|
+| **3.10.0** | 2026-03-16 | 🟢 MINOR | 사다리꼴 모듈화 + 03b 버그·취약점 수정 + pred_log_return 분리 + risk_composite 역할 분리 + Directional Accuracy + Top-k Precision |
 | **3.9.2** | 2026-03-16 | 🔵 PATCH | 위험도 지표 통일 + 리포트 개편 + 필터 통계 저장 + 노트북 구조·문서화 |
 | **3.9.1** | 2026-03-09 | 🔵 PATCH | log_return_1d 역산: 사다리꼴 적분 보정 (오차 감소) |
 | **3.9.0** | 2026-03-09 | 🟢 MINOR | log_return_1d 타겟 신규 추가 + log_return 정식 폐기 |
@@ -255,6 +258,6 @@ FDR API 장애 시 파이프라인 전체가 중단되는 현상을 방지하기
 ---
 
 **Last Updated**: 2026-03-16
-**Schema Version**: 3.9.2
+**Schema Version**: 3.10.0
 **Status**: ✅ Stable
 **Maintained by**: SignalWeaver Team

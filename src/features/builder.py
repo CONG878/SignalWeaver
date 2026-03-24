@@ -8,6 +8,11 @@ v3.6.0 원칙에 따라 가격 스케일에 종속되지 않는 무차원(Scale-
     1. 무차원 기술적 지표 (이동평균 이격도, 변동성, %B, RSI 등)
     2. 메타 지표 (유동성 점수, 리스크 팩터, 상장 폐지/거래 정지 플래그)
     3. 스케일 보정 피처 (log_liquidity 등 모델에 직접 투입되는 메타 파생 피처)
+
+## v3.10.0 변경 사항
+- build_universe_meta(): risk_composite 역할 분리
+    - feature_risk_composite : 모델 학습 피처 (feature_ 접두사, 학습에 사용)
+    - risk_composite          : 운영 메타 (접두사 없음, Universe 선정 로직 전용)
 """
 
 import pandas as pd
@@ -73,8 +78,34 @@ def build_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return df
 
 
+def build_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    캘린더 피처 생성.
+
+    생성 피처:
+        feature_is_monday : 월요일이면 1
+        feature_is_friday : 금요일이면 1
+    """
+    df = df.copy()
+    date_col = pd.to_datetime(df['date'])
+
+    df['feature_is_monday'] = (date_col.dt.dayofweek == 0).astype(int)
+    df['feature_is_friday'] = (date_col.dt.dayofweek == 4).astype(int)
+
+    return df
+
+
 def build_universe_meta(df: pd.DataFrame) -> pd.DataFrame:
-    """운영 판단용 메타 지표 및 관련 피처 생성"""
+    """
+    운영 판단용 메타 지표 및 관련 피처 생성.
+
+    ## v3.10.0 risk_composite 역할 분리
+    - feature_risk_composite : 모델 학습 피처. feature_ 접두사를 가지며
+                               feature_cols 자동 인식 대상에 포함됨.
+    - risk_composite          : 운영 메타. 접두사 없음.
+                               Universe 선정 로직(select_universe.py)에서만 참조.
+    두 컬럼은 동일한 값으로 생성됩니다.
+    """
     print("🏛️ Building Universe Meta & Log Features...")
     df = df.copy()
     
@@ -85,15 +116,21 @@ def build_universe_meta(df: pd.DataFrame) -> pd.DataFrame:
     )
     df['feature_log_liquidity'] = np.log1p(df['liquidity_score'])
     
-    # 리스크 메타 지표 (0~1 정규화)
+    # 리스크 메타 지표 계산 (0~1 정규화)
     df['risk_volatility'] = df['feature_volatility_20'].fillna(0)
     df['risk_volume_surge'] = (df['feature_volume_ratio'] > 3.0).astype(int)
     
     max_vol = df['risk_volatility'].max()
-    df['risk_composite'] = (
+    _risk_value = (
         (df['risk_volatility'] / max_vol if max_vol > 0 else 0) * 0.5 +
         df['risk_volume_surge'] * 0.5
     )
+
+    # ✨ v3.10.0: 두 역할을 명시적으로 분리
+    # feature_risk_composite: 모델 학습 피처 (feature_ 접두사, 학습에 포함됨)
+    df['feature_risk_composite'] = _risk_value
+    # risk_composite: 운영 메타 (Universe 선정 로직 전용, feature_cols에 포함되지 않음)
+    df['risk_composite'] = _risk_value
     
     df['is_suspended'] = (df['volume'] == 0).astype(int)
     df['is_delisted'] = 0 

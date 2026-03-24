@@ -8,6 +8,7 @@ import numpy as np
 import copy
 import scipy.stats as stats
 from src.models.base import ModelBase
+from src.utils.trapezoidal import trapezoid_log_close
 
 _VALID_TARGET_TYPES = ("log_close", "log_return_1d")
 
@@ -314,9 +315,12 @@ class WalkForwardTrainer:
                 cum_pred = sum(preds_df[c].values for c in sorted_cols[:idx + 1])
                 cum_true = sum(eval_df[c].values  for c in sorted_cols[:idx + 1])
 
-                # y(t+h) = y(t) + cumsum_h + (Δy(t) − Δy(t+h)) / 2
-                temp_eval[f'pred_{col}'] = log_close_base + cum_pred + (delta_y_t - pred_delta_h) / 2
-                temp_eval[f'true_{col}'] = log_close_base + cum_true + (delta_y_t - true_delta_h) / 2
+                temp_eval[f'pred_{col}'] = trapezoid_log_close(
+                    log_close_base, cum_pred, delta_y_t, pred_delta_h
+                )
+                temp_eval[f'true_{col}'] = trapezoid_log_close(
+                    log_close_base, cum_true, delta_y_t, true_delta_h
+                )
         # ──────────────────────────────────────────────────────────────────
 
         per_horizon = {}

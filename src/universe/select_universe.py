@@ -20,6 +20,7 @@ from src.utils.risk import (
     calculate_composite_risk_score,
     normalize_risk_scores,
 )
+from src.utils.trapezoidal import trapezoid_log_close
 
 # 한국 시장 특화 필터
 from src.universe.filters import apply_hard_filters
@@ -96,7 +97,7 @@ def evaluate_model_accuracy(
 
             if use_conversion and 'target_log_close' in ticker_eval.columns:
                 log_close_base = ticker_eval['target_log_close'].values
-                
+
                 if 'target_log_return_1d' in ticker_eval.columns:
                     delta_y_t = ticker_eval['target_log_return_1d'].values
                 else:
@@ -114,9 +115,8 @@ def evaluate_model_accuracy(
                     if f'true_{c}' in ticker_eval.columns
                 )
 
-                # 사다리꼴 적분 보정
-                pred_vals = log_close_base + cum_pred + (delta_y_t - pred_delta_h) / 2
-                true_vals = log_close_base + cum_true + (delta_y_t - true_delta_h) / 2
+                pred_vals = trapezoid_log_close(log_close_base, cum_pred, delta_y_t, pred_delta_h)
+                true_vals = trapezoid_log_close(log_close_base, cum_true, delta_y_t, true_delta_h)
             else:
                 pred_vals = ticker_eval[pred_col].values
                 true_vals = ticker_eval[true_col].values
@@ -139,11 +139,28 @@ def evaluate_model_accuracy(
         rmse    = float(np.mean(rmse_list))
         ic_mean = float(np.mean(ic_list)) if ic_list else 0.0
 
+        # ✨ v3.10.0: Directional Accuracy — 방향성 일치율 계산
+        dir_matches = []
+        for col in sorted_cols:
+            pred_col = f'pred_{col}'
+            true_col = f'true_{col}'
+            if pred_col not in ticker_eval.columns or true_col not in ticker_eval.columns:
+                continue
+            p = ticker_eval[pred_col].values
+            t = ticker_eval[true_col].values
+            valid = ~np.isnan(p) & ~np.isnan(t)
+            p_v, t_v = p[valid], t[valid]
+            if len(p_v) > 1:
+                match = np.sign(p_v[1:] - p_v[:-1]) == np.sign(t_v[1:] - t_v[:-1])
+                dir_matches.extend(match.tolist())
+        directional_accuracy = float(np.mean(dir_matches)) if dir_matches else np.nan
+
         accuracy_metrics.append({
-            'ticker'         : ticker,
-            'rmse'           : rmse,
-            'confidence_rmse': 1 / (1 + rmse),
-            'ic_mean'        : ic_mean,
+            'ticker'               : ticker,
+            'rmse'                 : rmse,
+            'confidence_rmse'      : 1 / (1 + rmse),
+            'ic_mean'              : ic_mean,
+            'directional_accuracy' : directional_accuracy,
         })
 
     df_accuracy = pd.DataFrame(accuracy_metrics)
@@ -155,6 +172,8 @@ def evaluate_model_accuracy(
         print(f"   - RMS RMSE: {(df_accuracy['rmse'].pow(2).mean()) ** 0.5:.4f}")
         print(f"   - 평균 RMSE: {df_accuracy['rmse'].mean():.4f}")
         print(f"   - 평균 IC: {df_accuracy['ic_mean'].mean():.4f}")
+        da_mean = df_accuracy['directional_accuracy'].mean()
+        print(f"   - 평균 방향성 정확도: {da_mean:.4f}")
 
     return df_accuracy
 
@@ -398,7 +417,7 @@ def select_investment_universe(
         하드 필터 설정
     verbose : bool
         진행 상황 출력 여부
-        
+
     Returns
     -------
     dict
