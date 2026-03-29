@@ -78,11 +78,11 @@ def filter_tradability(
     ].copy()
     
     stats = {
-        'initial': initial_count,
-        'suspended': suspended_count,
-        'delisted': delisted_count,
-        'removed': initial_count - len(df_filtered),
-        'remaining': len(df_filtered)
+        'initial': int(initial_count),
+        'suspended': int(suspended_count),
+        'delisted': int(delisted_count),
+        'removed': int(initial_count - len(df_filtered)),
+        'remaining': int(len(df_filtered))
     }
     
     if verbose:
