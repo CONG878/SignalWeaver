@@ -1,0 +1,30 @@
+﻿# 기초 프레임워크 및 데이터 핸들링
+pandas
+numpy
+scipy
+pyarrow
+fastparquet          # v4.0.0 Seq 트랙 예측 결과 I/O 필수 엔진
+
+# 데이터 수집 (01_collect_data)
+finance-datareader   # KRX 및 주가 데이터 수집
+requests
+beautifulsoup4
+
+# 머신러닝 및 시뮬레이션 (03a_train_tabular)
+lightgbm             # Tabular 트랙 주요 모델
+scikit-learn         # RandomForest 및 전처리 도구
+joblib
+
+# 딥러닝 및 시계열 (03c_train_seq, scripts/train_seq.py)
+torch                # GRU 모델 및 Seq 트랙 핵심 프레임워크
+torchvision          # (선택 사항, 필요 시)
+tqdm                 # 학습 진행률 표시
+
+# 시각화 및 리포팅 (05_universe_selection)
+matplotlib
+seaborn
+openpyxl             # 엑셀 투자 리포트(.xlsx) 생성 필수
+
+# 기타 유틸리티
+pyyaml               # config.yaml 로드
+ipykernel            # Jupyter Notebook 실행 환경

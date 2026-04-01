@@ -1,9 +1,244 @@
-# Schema Changelog (Updated v3.10.0)
+# Schema Changelog (Updated v4.0.0)
 
 All notable changes to the data schema will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [4.0.0] - 2026-04-01
+
+### 🔴 MAJOR Changes — Seq 모델 트랙 신설 + 스키마 전반 정비
+
+변경 범위: **전체 파이프라인, 모델 계층, 설정 파일, 노트북 체계**  
+작성 기준일: 2026-03-25
+확정 기준일: 2026-04-01
+이전 안정 버전: v3.10.0 (Stable Baseline)
+
+---
+
+### 1. Seq 모델 트랙 신설 (핵심)
+
+#### 1.1 신규 파일
+
+| 파일 | 설명 |
+|------|------|
+| `src/models/seq_base.py` | `SeqModelBase` 추상 클래스. 3D 시퀀스 입력 시그니처. |
+| `src/models/gru_model.py` | `GRUModel` 구현. PyTorch GRU, `weights.pt + config.json` 저장. |
+| `src/data_loader/seq_builder.py` | 슬라이딩 윈도우 시퀀스 생성. 종목 경계 보호, NaN 자동 제거. |
+| `src/modeling/seq_trainer.py` | `SeqTrainer`. WFT와 독립. 동일 평가 파라미터로 기간 일치. |
+| `03c_train_seq.ipynb` | Seq 모델 학습 전용 노트북. |
+| `scripts/train_seq.py` | Seq 모델 학습용 스크립트. |
+
+#### 1.2 모델 저장 포맷 (GRUModel)
+
+pickle 미사용. 디렉토리 단위 저장.
+
+```
+data/03_seq/{model_date}/gru/
+├── weights.pt      torch.save(state_dict)
+└── config.json     아키텍처 + 학습 설정 + 메타데이터
+```
+
+기존 Tabular 모델(pickle)은 v4.1.0에서 마이그레이션 예정.
+
+#### 1.3 val/test_predictions.parquet 컬럼 규격 통일
+
+Seq 트랙 산출물이 Tabular 트랙과 동일한 컬럼 규격을 따릅니다.
+05단계 `select_investment_universe()`가 구분 없이 처리 가능합니다.
+
+```python
+# Tabular (forecast_horizon=5)
+['date', 'ticker', 'fold',
+ 'pred_target_log_return_1d_h1', ..., 'pred_target_log_return_1d_h5',
+ 'true_target_log_return_1d_h1', ..., 'true_target_log_return_1d_h5']
+
+# Seq (forecast_horizon=20)
+['date', 'ticker', 'fold',
+ 'pred_target_log_return_1d_h1', ..., 'pred_target_log_return_1d_h20',
+ 'true_target_log_return_1d_h1', ..., 'true_target_log_return_1d_h20']
+```
+
+#### 1.4 04단계 GRU 예측 경로
+
+`is_seq_model(active_model)` 분기로 Tabular / Seq 경로 자동 선택.  
+입력 구성 방식만 다르며 역산 로직(`trapezoid_log_close`)은 동일.
+
+#### 1.5 메모리 최적화 (On-the-fly SeqDataset)
+초기 `build_sequences()` 방식의 메모리 폭증(OOM) 문제를 해결하기 위해 `SeqDataset`을 전면 재설계했습니다 (v4.0.0 rev2). 
+전체 텐서를 미리 메모리에 적재하지 않고, `(ticker, start_idx)` 인덱스 목록만 보관한 뒤 배치 요청 시 원본 DataFrame에서 즉석(On-the-fly)으로 슬라이스를 추출합니다.
+
+#### 1.6 장시간 학습용 CLI 스크립트 (`scripts/train_seq.py`)
+Jupyter 커널의 메모리 해제 지연 및 장기 학습 불안정성을 극복하기 위해 독립된 OS 프로세스로 동작하는 학습 스크립트를 추가했습니다.
+- `--resume`: `checkpoint.pt`에서 학습 이어서 진행
+- `--eval-only`: 학습 없이 기존 가중치(`weights.pt`)로 평가 및 예측 파일만 재생성
+- `--n-folds`: 1(기본) / 2(v4.1.0 앙상블 대비용)
+
+#### 1.7 Parquet 저장 엔진 최적화 (`fastparquet`)
+Seq 트랙의 3D 텐서 기반 예측 결과를 `pyarrow`로 저장 시 발생하는 메타데이터 충돌(`Repetition level histogram size mismatch`)을 해결하기 위해, Seq 예측 산출물의 I/O 표준 엔진으로 호환성이 뛰어난 `fastparquet`을 정식 채택했습니다.
+
+---
+
+### 2. 노트북 번호 체계 개편
+
+#### 2.1 접미사 규칙
+
+- **접미사 생략**: 해당 번호 내 최상위가 유일한 경우.
+- **접미사 표기**: 최상위가 복수이거나 대등한 관계인 경우.
+
+#### 2.2 개명 목록
+
+| 변경 전 | 변경 후 |
+|---------|---------|
+| `99_save_trading_days.ipynb` | `00a_save_trading_days.ipynb` |
+| `98_save_macro_data.ipynb` | `00b_save_macro_data.ipynb` |
+| `97_forecast_macro.ipynb` | `00c_forecast_macro.ipynb` |
+| `03_train_predict.ipynb` | `03a_train_tabular.ipynb` |
+| *(없음)* | `03c_train_seq.ipynb` ← 신규 |
+
+실행 순서가 번호순과 일치합니다.
+
+---
+
+### 3. 파일명 정리
+
+#### 3.1 01단계 산출물 날짜 중복 제거
+
+경로가 이미 날짜를 포함하므로 파일명에서 날짜 제거.
+
+| 변경 전 | 변경 후 |
+|---------|---------|
+| `krx_prices_{YYYYMMDD}.parquet` | `prices.parquet` |
+| `ticker_master_{YYYYMMDD}.csv` | `ticker_master.csv` |
+
+`ProjectPaths.get_raw_parquet()`, `get_ticker_master()` 수정으로 완결.
+
+#### 3.2 모델 파일명 `v1` 제거
+
+`registry.json`이 버전 관리를 담당.
+
+| 변경 전 | 변경 후 |
+|---------|---------|
+| `{YYYYMMDD}_v1_{param_hash}.pkl` | `{YYYYMMDD}_{param_hash}.pkl` |
+
+---
+
+### 4. 컬럼명 재정비
+
+#### 4.1 change_pct 자동 검증
+
+01단계 수집 완료 후 등락률 컬럼을 자동 검증합니다.
+
+- 단순 등락률 → `change_rate`
+- 퍼센트 등락률 → `change_pct` (현행 유지)
+
+검증 로직: `src/data_loader/collector._detect_change_col_type()`
+
+파급 범위: `collector.py`, `02_build_dataset.ipynb`, `builder.py`, `04_forecast_future.ipynb`
+
+---
+
+### 5. config.yaml 수정
+
+#### 5.1 신규 섹션
+
+```yaml
+sequence:
+  seq_len: 60
+  forecast_horizon: 20
+  stride: 1
+  target_type: "log_return_1d"
+
+gru_params:
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
+  learning_rate: 0.001
+  batch_size: 256
+  epochs: 100
+  patience: 10
+  bidirectional: false
+
+active_seq_model: "gru"
+
+paths:
+  seq_dir: "data/03_seq"    # 신규
+```
+
+#### 5.2 제거
+
+```yaml
+# 삭제: training_dir과 중복
+paths:
+  model_dir: "data/03_training"   # ← 제거
+```
+
+#### 5.3 주석 보강
+
+`universe.model_date`와 `project.reference_date`의 역할 차이를 config.yaml 주석으로 명시.
+
+---
+
+### 6. src/utils/config.py 수정
+
+```python
+# 신규
+_SEQ_MODEL_NAMES = frozenset({"gru", "lstm"})
+
+def is_seq_model(active_model_str: str) -> bool:
+    """is_ensemble()과 대칭. 순수 seq 모델 단독 여부 판단."""
+    ...
+
+# 모델 alias에 seq 모델 추가
+_MODEL_ALIAS["gru"]  = ("gru",  "gru")
+_MODEL_ALIAS["lstm"] = ("lstm", "lstm")
+
+# ProjectPaths 신규 필드/메서드
+seq_dir: Path
+get_seq_model_dir() -> Path
+get_seq_val_predictions() -> Path
+get_seq_test_predictions() -> Path
+
+# 수정 메서드
+get_raw_parquet()  → "prices.parquet"       (날짜 중복 제거)
+get_ticker_master() → "ticker_master.csv"   (날짜 중복 제거)
+get_test_predictions_parquet()              (구: get_predictions_parquet)
+```
+
+---
+
+### 7. ⑤ 추가 정비 (스키마)
+
+| 항목 | 처리 |
+|------|------|
+| `paths.model_dir` 중복 | config.yaml에서 제거. `training_dir`으로 통일. |
+| `get_predictions_parquet()` 명칭 모호 | `get_test_predictions_parquet()`으로 개명. |
+| `universe.model_date` 역할 | config.yaml 주석으로 명확화. 통합하지 않음. |
+
+---
+
+### 8. 보류 항목 → v4.1.0
+
+| 항목 |
+|------|
+| EnsembleModel에 Seq 모델 통합 (Option A) |
+| 기존 모델 pickle → 포맷별 마이그레이션 (LGBM→.txt, RF→joblib, MLP→state_dict) |
+
+---
+
+### 호환성 노트
+
+**v3.x → v4.0.0 마이그레이션**
+
+재실행이 필요한 항목:
+- 01단계: `prices.parquet`, `ticker_master.csv`로 파일명 변경. 기존 파일은 수동 rename 또는 재수집.
+- 03a 이후: `get_predictions_parquet()` → `get_test_predictions_parquet()` 참조 코드 수정.
+- 노트북 개명: 내부 참조 문구 확인 후 수정.
+
+재실행 불필요:
+- `data/02_processed/`, `data/03_training/` 기존 산출물은 스키마 변경 없음.
+- Tabular 모델 (.pkl) 기존 파일은 그대로 사용 가능.
 
 ---
 
@@ -242,6 +477,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Type | 주요 변경 사항 |
 |---------|------|------|----------------|
+| **4.0.0** | 2026-04-01 | 🔴 MAJOR | Seq 모델(GRU) 트랙 신설, 파이프라인 스키마 개편 및 메모리/I/O 최적화 |
 | **3.10.0** | 2026-03-16 | 🟢 MINOR | 사다리꼴 모듈화 + 03b 버그·취약점 수정 + pred_log_return 분리 + risk_composite 역할 분리 + Directional Accuracy + Top-k Precision |
 | **3.9.2** | 2026-03-16 | 🔵 PATCH | 위험도 지표 통일 + 리포트 개편 + 필터 통계 저장 + 노트북 구조·문서화 |
 | **3.9.1** | 2026-03-09 | 🔵 PATCH | log_return_1d 역산: 사다리꼴 적분 보정 (오차 감소) |
@@ -257,7 +493,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-**Last Updated**: 2026-03-16
-**Schema Version**: 3.10.0
-**Status**: ✅ Stable
+**Last Updated**: 2026-04-01
+**Schema Version**: 4.0.0
+**Status**: ✅ Confirmed
 **Maintained by**: SignalWeaver Team

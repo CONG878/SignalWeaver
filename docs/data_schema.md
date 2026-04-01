@@ -1,311 +1,457 @@
-# 📄 Data Schema Definition (v3.10.0)
+# 📄 Data Schema — v4.0.0 (Confirmed)
 
-본 스키마는 SignalWeaver 프로젝트의 데이터 계약을 정의합니다.
-
----
-
-## 📌 Schema Version & Metadata
-
-| 속성 | 값 |
-|------|-----|
-| **Schema Version** | `3.10.0` |
-| **Last Updated** | 2026-03-16 |
-| **Latest Changes** | 사다리꼴 모듈화, 03b log_return_1d 버그·취약점 수정, pred_log_return 스키마 분리 |
-| **Compatibility** | `target_type: "log_return"` 사용 불가 (ValueError). `"log_close"` 또는 `"log_return_1d"` 사용 필수 |
+> **문서 유형**: 확정 스키마 (구현 완료 기준)
+> **작성 기준일**: 2026-03-25
+> **확정 기준일**: 2026-04-01
+> **Schema Version**: 4.0.0
+> **이전 안정 버전**: v3.10.0
 
 ---
 
-## 🔄 최근 변경 이력 요약
+## 0. v4.0.0 변경 범위 요약
 
-### v3.10.0 (2026-03-16) - 🟢 MINOR
-- **`src/utils/trapezoidal.py` 신설**: `trapezoid_log_close()` 함수로 사다리꼴 역산 수식 단일화. 03·04·05단계 및 Trainer에서 중복 정의된 수식을 모두 이 함수 호출로 교체.
-- **03b `log_return_1d` 버그 수정**: `target_prefix`를 `target_type`에 따라 동적으로 결정. `log_return_1d` 모드에서 `pred_cols`가 빈 리스트가 되던 문제 해결.
-- **03b `base_canonical` 취약점 수정**: `_build_ensemble_df()` 헬퍼로 date·ticker·fold·true_ 컬럼만 명시적으로 추출해 앙상블 예측 DataFrame 구성. 첫 번째 모델의 메타 컬럼이 암묵적으로 포함되던 문제 해결.
-- **`pred_log_return` 스키마 분리**: `future_forecasts.parquet` 공식 스키마에서 `pred_log_return` 컬럼 제거. `config.yaml`에 `debug.save_raw_predictions: true` 추가 시에만 포함.
-- **`risk_composite` 역할 분리**: `feature_risk_composite`(모델 학습 피처)와 `risk_composite`(운영 메타) 두 컬럼 동시 생성.
-- **`feature_cols` 예외 처리 제거**: 03단계에서 `risk_composite` 예외 제거, `feature_` 접두사만으로 자동 인식.
-- **Directional Accuracy 추가**: `evaluate_model_accuracy()`에 방향성 일치율 산출. Excel 리포트에 `방향성정확도` 컬럼 추가.
-- **Top-k Precision 추가**: 05단계 노트북 신규 셀. K=10·20·50·100 및 전체 후보 기준 정밀도와 기준선 출력.
-
-### v3.9.2 (2026-03-16) - 🔵 PATCH
-- 위험도 지표 정의 통일, 리포트 개편, 필터 통계 저장, 노트북 구조·문서화 패치.
-
-### v3.9.1 (2026-03-09) - 🔵 PATCH
-- **log_return_1d 역산 보정**: cumsum 방식에서 사다리꼴 적분 보정으로 변경.
-- **log_close_ref 앵커 추가**: 05단계 평가에 `target_log_return_1d` 컬럼 추가 참조.
-
-### v3.9.0 (2026-03-09) - 🟢 MINOR
-- **log_return_1d 타겟 신규 추가**: 1일 당일 등락률 예측 모드 추가.
-- **log_return 정식 폐기**: 누적 로그 수익률 타겟 완전 삭제.
-
-### v3.8.1 (2026-03-05) - 🔵 PATCH
-- API Fallback 강화, datetime 버그 수정.
-
-### v3.8.0 (2026-02-28) - 🟢 MINOR
-- MLP Multi-output 모델 신설, 앙상블 조합 동적 지정, 04단계 건너뜀 처리.
+| 카테고리 | 항목 | 성격 |
+|----------|------|------|
+| **신규** | SeqModelBase 계층 | 아키텍처 |
+| **신규** | GRUModel (On-the-fly DataLoader, 체크포인트) | 모델 |
+| **신규** | SeqDataset (인덱스 기반 on-the-fly) | 데이터 |
+| **신규** | split_by_date() → SeqDataset 직접 반환 | 데이터 |
+| **신규** | SeqTrainer (n_folds, resume) | 파이프라인 |
+| **신규** | scripts/train_seq.py (03c 노트북 대체) | 실행 |
+| **개명** | 노트북 번호 체계 (00계열 + a/b/c 접미사) | 스키마 |
+| **개명** | 03_train_predict → 03a_train_tabular | 스키마 |
+| **개명** | 99_meta → 00_prep (시간독립/날짜의존 분리) | 스키마 |
+| **개명** | 01단계 산출물 파일명 날짜 중복 제거 | 스키마 |
+| **개명** | 모델 파일명 v1 제거 | 스키마 |
+| **개명** | change_pct → change_rate (자동 검증) | 스키마 |
+| **수정** | config.yaml 대폭 확장 | 설정 |
+| **수정** | ProjectPaths 전면 재편 | 인프라 |
+| **수정** | get_predictions_parquet → get_test_predictions_parquet | 인프라 |
+| **수정** | paths.model_dir 중복 제거 | 설정 |
+| **수정** | Parquet 저장 엔진: fastparquet 명시 | 인프라 |
+| **보류** | 기존 모델 pickle → 포맷별 마이그레이션 | v4.1.0 |
+| **보류** | EnsembleModel Seq 모델 통합 | v4.1.0 |
 
 ---
 
-## 📌 1. 파일 저장 규칙 / 포맷
+## 1. 노트북 및 스크립트 체계
 
-### 1.1 기본 포맷
+### 1.1 접미사 규칙
 
-| 단계 | 폴더 | 포맷 |
-|------|------|------|
-| **01단계 (Raw)** | `data/01_raw/{date}/` | CSV + 통합 Parquet |
-| **02단계 (Processed)** | `data/02_processed/{date}/` | Parquet + 선택적 CSV |
-| **03단계 (Training)** | `data/03_training/{date}/{folder_name}/` | Parquet + 모델별 폴더 |
-| **04단계 (Forecasts)** | `data/04_forecasts/{date}/{folder_name}/` | Parquet + 선택적 CSV |
-| **05단계 (Universe)** | `data/05_universe/{date}/{folder_name}/` | Parquet + CSV + JSON |
-| **99_meta** | `data/99_meta/` | Parquet + CSV |
+- **접미사 생략**: 해당 번호 내 최상위가 유일한 경우
+- **접미사 표기 (a, b, c, ...)**: 최상위가 복수이거나 대등한 관계인 경우
 
-### 1.2 파일 네이밍 규칙
+### 1.2 확정 목록
+
+| 파일명 | 역할 | 변경 여부 |
+|--------|------|-----------|
+| `00a_save_trading_days.ipynb` | 캘린더 생성 | 개명 (구: 99) |
+| `00b_save_macro_data.ipynb` | 매크로 수집 | 개명 (구: 98) |
+| `00c_forecast_macro.ipynb` | 매크로 미래값 추정 | 개명 (구: 97) |
+| `01_collect_data.ipynb` | KRX 수집 | 유지 |
+| `02_build_dataset.ipynb` | 피처 엔지니어링 | 유지 |
+| `03a_train_tabular.ipynb` | Tabular 모델 학습 | 개명 (구: 03_train_predict) |
+| `03b_train_ensemble.ipynb` | 앙상블 가중치 최적화 | 유지 |
+| `03c_train_seq.ipynb` | Seq 모델 학습 (대화형) | **신규** |
+| `scripts/train_seq.py` | Seq 모델 장기 학습용 CLI | **신규** (03c와 병존) |
+| `04_forecast_future.ipynb` | 미래 예측 | 수정 (GRU 분기 추가) |
+| `05_universe_selection.ipynb` | 유니버스 선정 | 유지 |
+
+### 1.3 00 계열 구조
 
 ```
-# 01단계: 원시 데이터
-data/01_raw/{YYYYMMDD}/
-├── krx_prices_{YYYYMMDD}.parquet
-├── ticker_master_{YYYYMMDD}.csv
-└── csv/{종목명}.csv
+00a_save_trading_days   ─┐  (독립)
+00b_save_macro_data     ─┴─→ 00c_forecast_macro
+```
 
-# 02단계: 전처리 데이터
-data/02_processed/{YYYYMMDD}/
-├── dataset.parquet
-└── csv/{종목명}.csv
+### 1.4 scripts/train_seq.py 사용법
 
-# 03단계: 학습/검증/테스트 예측
-data/03_training/{YYYYMMDD}/
-├── lightgbm/
-│   ├── v1_lgbm_{YYYYMMDD}_{hash}.pkl
-│   ├── registry.json
-│   ├── val_predictions.parquet
-│   └── test_predictions.parquet
-├── randomforest/  { 동일 구조 }
-├── mlp/           { 동일 구조 }
-└── lgbm+rf/       { 동일 구조 }
+```bash
+# 처음부터 학습 (config.yaml의 epochs 사용)
+python scripts/train_seq.py
 
-# 04단계: 미래 예측
-data/04_forecasts/{YYYYMMDD}/
-├── lightgbm/future_forecasts.parquet
-└── lgbm+rf/future_forecasts.parquet
+# 에포크 수 임시 지정
+python scripts/train_seq.py --epochs 20
 
-# 05단계: 유니버스 선정
-data/05_universe/{YYYYMMDD}/
-└── {folder_name}/
-    ├── universe_full.parquet
-    ├── universe_candidates.parquet
-    ├── investment_report.csv / .xlsx
-    └── filter_statistics.json
+# 체크포인트에서 이어서 학습
+python scripts/train_seq.py --resume
 
-# 전역 메타 데이터
-data/99_meta/
-├── krx_calendar.csv
-├── macro_regime.parquet
-└── macro_regime_forecast.parquet
+# 이어서 + 에포크 지정 (예: epoch 11~20)
+python scripts/train_seq.py --resume --epochs 10
+
+# 학습 없이 평가만 (weights.pt 필요)
+python scripts/train_seq.py --eval-only
+
+# 2-Fold (앙상블 대비, v4.1.0)
+python scripts/train_seq.py --n-folds 2
 ```
 
 ---
 
-## 📌 2. 공통 기본 컬럼
+## 2. 디렉토리 구조
 
-| 컬럼 | 타입 | 설명 | 예시 |
-|------|------|------|------|
-| **date** | datetime64 | 거래일 | 2024-01-15 |
-| **ticker** | str | 종목 코드 | 005930 |
-| **close** | float64 | 종가 | 70500.0 |
+```
+SignalWeaver/
+├── config/config.yaml
+├── data/
+│   ├── 00_prep/
+│   │   ├── krx_calendar.csv              ← 시간 독립 (긴 달력, 필터링하여 사용)
+│   │   └── {ref_date}/
+│   │       ├── macro_regime.parquet      ← 날짜 의존
+│   │       └── macro_regime_forecast.parquet
+│   ├── 01_raw/{ref_date}/
+│   │   ├── prices.parquet                ← (변경) 날짜 중복 제거
+│   │   ├── ticker_master.csv             ← (변경) 날짜 중복 제거
+│   │   └── csv/
+│   ├── 02_processed/{ref_date}/
+│   │   └── dataset.parquet
+│   ├── 03_training/{model_date}/{model_name}/    Tabular 트랙
+│   │   ├── {YYYYMMDD}_{param_hash}.pkl           ← (변경) v1 제거
+│   │   ├── registry.json
+│   │   ├── val_predictions.parquet
+│   │   └── test_predictions.parquet
+│   ├── 03_seq/{model_date}/gru/                  Seq 트랙
+│   │   ├── weights.pt                    추론 전용 최선 가중치
+│   │   ├── config.json                   아키텍처 + 메타
+│   │   ├── checkpoint.pt                 resume용 (학습 중 자동 갱신, 완료 후 보존)
+│   │   ├── val_predictions.parquet       n_folds=2일 때만 생성
+│   │   └── test_predictions.parquet
+│   ├── 04_forecasts/{ref_date}/{model_name}/
+│   │   └── future_forecasts.parquet
+│   ├── 05_universe/{ref_date}/{model_name}/
+│   │   ├── universe_candidates.parquet
+│   │   ├── investment_report.csv / .xlsx
+│   │   └── filter_statistics.json
+├── docs/
+├── scripts/
+│   └── train_seq.py                      ← 신규
+└── src/
+    ├── data_loader/
+    │   ├── collector.py                  change_pct 자동 검증
+    │   └── seq_builder.py               SeqDataset, split_by_date
+    ├── modeling/
+    │   ├── trainer.py                   Tabular WFT (유지)
+    │   └── seq_trainer.py               SeqTrainer
+    ├── models/
+    │   ├── base.py
+    │   ├── seq_base.py                  SeqModelBase
+    │   ├── gru_model.py                 GRUModel
+    │   ├── lightgbm_model.py
+    │   ├── randomforest_model.py
+    │   ├── mlp_model.py
+    │   ├── ensemble_model.py
+    │   └── artifact.py                  v1 제거
+    ├── universe/
+    └── utils/
+        ├── config.py                    ProjectPaths 전면 재편
+        ├── risk.py
+        ├── trading.py
+        └── trapezoidal.py
+```
 
 ---
 
-## 📌 3. Step 1 (Raw Data) - 입력 스키마
+## 3. 파일명 정리
 
-```python
-dtypes = {
-    'Date'  : 'datetime64[ns]',
-    'Open'  : 'float64',
-    'High'  : 'float64',
-    'Low'   : 'float64',
-    'Close' : 'float64',
-    'Volume': 'float64',
+### 3.1 01단계 산출물
+
+| 변경 전 | 변경 후 |
+|---------|---------|
+| `krx_prices_{YYYYMMDD}.parquet` | `prices.parquet` |
+| `ticker_master_{YYYYMMDD}.csv` | `ticker_master.csv` |
+
+### 3.2 모델 파일명
+
+| 변경 전 | 변경 후 |
+|---------|---------|
+| `{YYYYMMDD}_v1_{param_hash}.pkl` | `{YYYYMMDD}_{param_hash}.pkl` |
+
+### 3.3 Seq 트랙 저장 포맷
+
+pickle 미사용. 디렉토리 단위 저장.
+
+```json
+// config.json 구조
+{
+  "model_name": "gru",
+  "model_version": "v4.0.0_gru_{ref_date}",
+  "seq_len": 60,
+  "forecast_horizon": 20,
+  "n_features": 20,
+  "hidden_size": 128,
+  "num_layers": 2,
+  "dropout": 0.2,
+  "bidirectional": false,
+  "feature_list": ["feature_ma_5_disparity", "..."],
+  "target_type": "log_return_1d",
+  "target_columns": ["target_log_return_1d_h1", "..."],
+  "trained_at": "2026-04-01T00:00:00",
+  "val_rmse": null,
+  "test_rmse": 0.0
 }
-index.name = 'ticker'
 ```
+
+### 3.4 체크포인트 구조
+
+```python
+# checkpoint.pt 내용
+{
+    "epoch":           int,         # 마지막 학습 에포크
+    "net_state":       state_dict,  # 현재 가중치
+    "optimizer_state": state_dict,  # Adam 모멘텀 등
+    "best_val_loss":   float,       # 지금까지 최선 val_loss
+    "best_net_state":  state_dict,  # 지금까지 최선 가중치
+    "no_improve":      int,         # 연속 미개선 횟수
+}
+```
+
+**resume 우선순위**:
+1. `checkpoint.pt` 존재 → 전체 컨텍스트 복원
+2. `checkpoint.pt` 없고 `weights.pt` 존재 → 가중치만 복원 + 경고
+3. 둘 다 없음 → `FileNotFoundError`
 
 ---
 
-## 📌 4. Step 2 (Processed) - Feature + Target 스키마
+## 4. 컬럼명 재정비
 
-### 4.1 Target 컬럼
+### 4.1 change_pct 자동 검증
 
-```python
-# 02단계에서 생성되는 기준값
-'target_log_close'        # log(close)         — log_close 모드용
-'target_log_return_1d'    # log1p(change_pct)  — log_return_1d 모드용 (v3.9.0)
-                          # 사다리꼴 역산의 Δy(t) 앵커로도 사용 (v3.9.1)
+수집 완료 후 `collector._is_pct_scale()`로 자동 판별.
 
-# Trainer 내부에서 동적 생성 (horizon별)
-'target_log_close_h1'          ~ 'target_log_close_h5'
-'target_log_return_1d_h1'      ~ 'target_log_return_1d_h5'
+- 단순 등락률 → `change_rate` (FDR 기본)
+- 퍼센트 등락률 → `change_pct` (예외적 소스)
 
-# [REMOVED v3.9.0] — 완전 삭제, 사용 불가
-# 'target_log_return_h{n}'
-```
+### 4.2 접두사 체계 (변경 없음)
 
----
-
-## 📌 5. Step 3 (Training) - 모델 & 예측 스키마
-
-### 5.1 val/test_predictions.parquet 스키마
-
-**`log_close` 모드:**
-```python
-columns = [
-    'date', 'ticker', 'fold',
-    'pred_target_log_close_h1', ~ 'pred_target_log_close_h5',
-    'true_target_log_close_h1', ~ 'true_target_log_close_h5',
-]
-```
-
-**`log_return_1d` 모드:**
-```python
-columns = [
-    'date', 'ticker', 'fold',
-    'pred_target_log_return_1d_h1', ~ 'pred_target_log_return_1d_h5',
-    'true_target_log_return_1d_h1', ~ 'true_target_log_return_1d_h5',
-]
-# 보고 지표 산출 시 trapezoid_log_close() 적용 (Trainer 내부, 외부 비노출)
-```
+| 접두사 | 의미 |
+|--------|------|
+| `feature_` | 모델 입력 피처 |
+| `target_` | 학습 타겟 |
+| `pred_` | 모델 출력 예측값 |
+| `true_` | 예측과 대응하는 실측값 |
+| 없음 | 운영 메타 |
 
 ---
 
-## 📌 6. Step 3b (Ensemble) - 앙상블 가중치 최적화
-
-- 입력: `val_predictions.parquet` (검증 폴드 전용)
-- 목표: `-IC(Spearman)` 최소화 (SLSQP, 합계 1 제약)
-- **v3.10.0**: `target_prefix`를 `target_type`에 따라 동적 결정. `_build_ensemble_df()` 헬퍼로 안전한 컬럼 구성.
-
-```python
-# v3.10.0 수정 후 — 명시적 DataFrame 구성
-keep_cols = ['date', 'ticker', 'fold'] + true_cols
-result = base_df[keep_cols].iloc[mask].copy().reset_index(drop=True)
-for i, col in enumerate(pred_cols):
-    result[col] = blended[:, i]
-```
-
----
-
-## 📌 7. Step 4 (Forecasts) - 미래 예측 결과 스키마
-
-### 7.1 Recursive Extension 역산 로직 (v3.10.0 모듈화)
-
-```python
-from src.utils.trapezoidal import trapezoid_log_close
-
-# ── log_close 모드 ──────────────────────────────────────────────────────
-pred_log_close = model.predict(X)
-pred_close     = exp(pred_log_close)
-
-# ── log_return_1d 모드 (v3.9.1 ~ / v3.10.0 모듈화) ─────────────────────
-pred_log_close = trapezoid_log_close(
-    log_close_base,   # y(t): 청크 시작 기준 로그 가격
-    cum_log_return,   # Σ Δy_i, i=0..h-1
-    delta_y_t,        # Δy(t): 앵커
-    pred_delta_h,     # Δy(t+h): 현재 h 시차 예측값
-)
-pred_close = exp(pred_log_close)
-```
-
-### 7.2 future_forecasts.parquet 스키마 (✨ v3.10.0 갱신)
-
-```python
-# 공식 컬럼 (항상 포함)
-columns = [
-    'date',             # 예측 대상 날짜
-    'ticker',           # 종목 코드
-    'horizon',          # 예측 시차 (1~5)
-    'chunk_idx',        # Recursive Extension chunk 번호
-    'pred_log_close',   # 예측 로그 종가
-    'pred_close',       # 예측 종가 (원화)
-]
-
-# 디버그 컬럼 (config.yaml debug.save_raw_predictions: true 시에만 포함)
-# 'pred_log_return'   # 당일 등락률 로그값 (raw 예측, 참고용)
-```
-
----
-
-## 📌 8. Step 5 (Universe) - 최종 선정 결과 스키마
-
-- `universe_full.parquet`: `ticker`, `name`, `accuracy_score`, `profitability_score`, `risk_composite`, `composite_score`, `selected`
-- `universe_candidates.parquet`: `ticker`, `name`, `composite_score`, `rank`, `recommendation`
-
----
-
-## 📌 9. Step 99_meta - 전역 메타 데이터 스키마
-
-### 9.1 `src/utils/trapezoidal.py` (✨ v3.10.0 신설)
-
-```python
-from src.utils.trapezoidal import trapezoid_log_close
-
-# y(t+h) = y(t) + Σ Δy_i + (Δy(t) - Δy(t+h)) / 2
-pred_log_close = trapezoid_log_close(log_close_base, cum_pred, delta_y_t, delta_y_h)
-```
-
-사용 위치: `src/modeling/trainer.py`, `03_train_predict.ipynb`, `03b_train_ensemble.ipynb`, `04_forecast_future.ipynb`, `src/universe/select_universe.py`
-
----
-
-## 📌 10. 설정 파일 스키마 (config.yaml)
+## 5. config.yaml 확정
 
 ```yaml
-training:
-  target_col_name: "target_log_return_1d"
-  target_type: "log_return_1d"   # "log_close" 또는 "log_return_1d"
-  horizons: [1, 2, 3, 4, 5]
+project:
+  reference_date: "20260323"    # 데이터 수집 기준일
 
-active_model: "mlp+lgbm"
+sequence:
+  seq_len: 60
+  forecast_horizon: 20
+  stride: 5                      # 메모리 절감: stride=1 대비 1/5
+  target_type: "log_return_1d"  # 항상 log_return_1d 권장
 
-# ✨ v3.10.0 신설: 디버그용 raw 예측값 저장 플래그
-debug:
-  save_raw_predictions: false    # true 시 pred_log_return 컬럼 포함
+gru_params:
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
+  learning_rate: 0.001
+  batch_size: 256
+  epochs: 10                    # 매 실행당 추가 에포크 수
+  patience: 10
+  bidirectional: false
+
+active_seq_model: "gru"
+
+calendar:
+  start_date:   "2020-01-01"   # 긴 달력 (00a 전용)
+  end_date:     "2035-12-31"
+  forecast_end: "2026-05-27"   # 예측 상한 (00c, 04단계 공용)
+
+paths:
+  raw_dir: "data/01_raw"
+  processed_dir: "data/02_processed"
+  training_dir: "data/03_training"
+  seq_dir: "data/03_seq"
+  forecasts_dir: "data/04_forecasts"
+  universe_dir: "data/05_universe"
+  prep_dir: "data/00_prep"      # 구: meta_dir: "data/99_meta"
 ```
 
 ---
 
-## 📌 11. 호환성 노트
+## 6. 모델 아키텍처 계층
 
-### v3.9.x → v3.10.0 마이그레이션
-
-**재실행 필요 (스키마 변경):**
-- `log_return_1d` 모드: 03b단계부터 재실행 권장 (버그 수정 효과 적용)
-- 04단계 산출물: `pred_log_return` 컬럼이 기본 제거됨. 하위 스텝에서 이 컬럼을 직접 참조하는 코드가 있다면 수정 필요.
-
-**재실행 불필요:**
-- `log_close` 모드 운용 중인 경우: 03b의 `target_prefix` 결정 로직이 동일하므로 결과 변화 없음.
-- 01·02단계: 스키마 변경 없음.
+```
+ModelBase (ABC)
+├── LightGBMModel          pickle (→ v4.1.0 마이그레이션)
+├── RandomForestMultiModel pickle
+├── MLPModel               pickle
+├── EnsembleModel          pickle
+└── SeqModelBase (ABC)
+    └── GRUModel           weights.pt + config.json + checkpoint.pt
+```
 
 ---
 
-## 🔍 스키마 버전 관리 정책
+## 7. Seq 트랙 핵심 설계
+
+### 7.1 SeqDataset — On-the-fly
+
+```python
+# 메모리 사용량 비교
+# 기존: O(N_samples × seq_len × n_features) float32  → 수 GB
+# v4.0.0: O(원본 df) + O(N_samples × 2) int          → df 크기 + 수 MB
+```
+
+인덱스 목록 `(global_start, global_end)` 쌍만 보관. `__getitem__` 시 원본 DataFrame 슬라이스 즉석 추출.
+
+### 7.2 split_by_date() — 실제 거래일 달력 기준 분할
+
+```python
+# stride와 무관하게 실제 거래일 기준으로 창 크기 적용
+# df의 전체 날짜를 달력으로 사용 → stride=5에서도 45거래일이 정확히 45일
+splits = split_by_date(df, ..., all_trading_dates=pd.DatetimeIndex(...))
+# 반환: {ds_train, ds_val, ds_test: SeqDataset, dates: dict}
+```
+
+### 7.3 SeqTrainer.run() 파라미터
+
+```python
+trainer.run(
+    df,
+    train_end         = "2025-11-05",
+    valid_window_days = 45,   # 실제 거래일 기준
+    test_window_days  = 45,   # 실제 거래일 기준
+    n_folds           = 1,    # 1: 권장 / 2: 앙상블 대비
+    resume            = False,
+    fit_kwargs        = {"epochs": 100, "patience": 10},
+)
+```
+
+### 7.4 파라미터 관계 및 제약
 
 ```
-MAJOR: 근본 구조 변경 (하위 호환 불가)
-MINOR: 기능 추가 / 파이프라인 개선
-PATCH: 버그 수정
+[필수 데이터 길이 per ticker]
+  min_history + seq_len + forecast_horizon
+
+[충분한 데이터 범위 조건]
+  data_end - train_end ≥ embargo + valid_window + test_window
+  embargo = forecast_horizon
+
+[seq_len vs forecast_horizon]
+  완전히 독립. 배수 관계 불필요.
+  seq_len: 모델의 "기억 창문" (과거 참조 길이)
+  forecast_horizon: 모델의 "예측 창문" (출력 크기)
+
+[stride 영향]
+  샘플 수: N_tickers × (유효 날짜 수 / stride)
+  날짜 경계: stride와 무관 (실제 거래일 달력 기준)
 ```
 
-| Version | Date | Type | 주요 변경 사항 |
-|---------|------|------|----------------|
-| **3.10.0** | 2026-03-16 | 🟢 MINOR | 사다리꼴 모듈화 + 03b 버그·취약점 + pred_log_return 분리 |
-| **3.9.2** | 2026-03-16 | 🔵 PATCH | 위험도 지표 통일 + 리포트 개편 + 필터 통계 저장 |
-| **3.9.1** | 2026-03-09 | 🔵 PATCH | log_return_1d 역산: 사다리꼴 적분 보정 |
-| **3.9.0** | 2026-03-09 | 🟢 MINOR | log_return_1d 타겟 신규 추가 + log_return 정식 폐기 |
-| **3.8.1** | 2026-03-05 | 🔵 PATCH | API Fallback 및 datetime 타입 버그 수정 |
-| **3.8.0** | 2026-02-28 | 🟢 MINOR | MLP 모델 + 앙상블 동적 조합 + 04단계 건너뜀 처리 |
+### 7.5 predictions.parquet 컬럼 규격
+
+Tabular 트랙과 동일하여 05단계가 구분 없이 처리 가능.
+
+```python
+# Tabular (forecast_horizon=5)
+['date', 'ticker', 'fold',
+ 'pred_target_log_return_1d_h1', ..., 'h5',
+ 'true_target_log_return_1d_h1', ..., 'h5']
+
+# Seq (forecast_horizon=20)
+['date', 'ticker', 'fold',
+ 'pred_target_log_return_1d_h1', ..., 'h20',
+ 'true_target_log_return_1d_h1', ..., 'h20']
+```
 
 ---
 
-**Last Updated**: 2026-03-16
-**Schema Version**: 3.10.0
-**Status**: ✅ Stable
-**Maintained by**: SignalWeaver Team
+## 8. 인프라
+
+### 8.1 ProjectPaths 변경 요약
+
+```python
+# 제거
+meta_dir        # → prep_dir / prep_dated_dir으로 분리
+paths.model_dir # → training_dir로 통일
+
+# 추가
+prep_dir: Path          # data/00_prep/
+prep_dated_dir: Path    # data/00_prep/{ref_date}/
+seq_dir: Path           # data/03_seq/{model_date}/{seq_model}/
+
+# 추가 메서드
+get_calendar()           → prep_dir / "krx_calendar.csv"
+get_macro_parquet()      → prep_dated_dir / "macro_regime.parquet"
+get_macro_forecast_parquet() → prep_dated_dir / "macro_regime_forecast.parquet"
+get_seq_model_dir()      → seq_dir
+get_seq_val_predictions() → seq_dir / "val_predictions.parquet"
+get_seq_test_predictions() → seq_dir / "test_predictions.parquet"
+
+# 개명
+get_predictions_parquet() → get_test_predictions_parquet()
+get_raw_parquet()        → raw_dir / "prices.parquet"
+get_ticker_master()      → raw_dir / "ticker_master.csv"
+```
+
+### 8.2 Parquet 저장 엔진
+
+Seq 트랙 predictions는 `fastparquet` 엔진 필요.
+
+```python
+df.to_parquet(path, index=False, engine="fastparquet")
+```
+
+Tabular 트랙은 기본 엔진(`pyarrow`) 유지. 혼용 시 읽기 엔진을 통일해야 합니다.
+
+### 8.3 04단계 NaN 처리
+
+Seq 트랙 예측 시 입력 시퀀스 윈도우에 NaN이 있을 수 있음. `ffill → bfill → fillna(0)` 적용.
+
+```python
+X_window_df = X_window_df.ffill().bfill().fillna(0)
+```
+
+### 8.4 config.py 신규 헬퍼
+
+```python
+_SEQ_MODEL_NAMES = frozenset({"gru", "lstm"})
+
+def is_seq_model(active_model_str: str) -> bool:
+    """순수 seq 모델 단독 여부. is_ensemble()과 대칭."""
+```
+
+---
+
+## 9. 달력 운용 정책
+
+```
+krx_calendar.csv: 시간 독립, data/00_prep/ 직접 위치
+  → 장기 범위로 한 번 생성, 코드에서 필터링
+  → calendar.start_date / end_date: 달력 생성 범위 (00a 전용)
+  → calendar.forecast_end: 예측 상한 (00c, 04단계 공용)
+
+macro_regime.parquet: 날짜 의존, data/00_prep/{ref_date}/
+macro_regime_forecast.parquet: 날짜 의존, data/00_prep/{ref_date}/
+```
+
+---
+
+## 10. 보류 항목 → v4.1.0
+
+| 항목 |
+|------|
+| EnsembleModel Seq 모델 통합 (Tabular + Seq 혼합 앙상블) |
+| 기존 모델 pickle → 포맷별 마이그레이션 (LGBM→.txt, RF→joblib, MLP→state_dict) |
+| `train_seq.py`의 원자적 Parquet 쓰기 (tmp → rename) |
+
+---
+
+## 11. 버전 이력
+
+```
+v3.10.0  2026-03-16  MINOR   Stable Baseline (Seq 트랙 도입 전 기준점)
+v4.0.0   2026-04-01  MAJOR   Seq 모델 트랙 + 스키마 전반 정비 (확정)
+v4.1.0   미정        MINOR   EnsembleModel Seq 통합, pickle 마이그레이션
+```
+
+---
+
+*Schema Version: 4.0.0*
+*Status: ✅ Confirmed*
+*Maintained by: SignalWeaver Team*
