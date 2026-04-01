@@ -116,7 +116,8 @@ def evaluate_model_accuracy(
                 )
 
                 pred_vals = trapezoid_log_close(log_close_base, cum_pred, delta_y_t, pred_delta_h)
-                true_vals = trapezoid_log_close(log_close_base, cum_true, delta_y_t, true_delta_h)
+                true_vals = trapezoid_log_close(log_close_base, cum_pred, delta_y_t, true_delta_h)
+                
             else:
                 pred_vals = ticker_eval[pred_col].values
                 true_vals = ticker_eval[true_col].values
