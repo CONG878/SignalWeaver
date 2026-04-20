@@ -13,16 +13,13 @@ from typing import Any, Dict, List, Optional
 from tqdm import tqdm
 from scipy.stats import spearmanr
 
-# 범용 계산 유틸리티
 from src.utils.trading import find_best_trade_vectorized
 from src.utils.risk import (
     calculate_risk_metrics,
     calculate_composite_risk_score,
     normalize_risk_scores,
 )
-from src.utils.trapezoidal import trapezoid_log_close
-
-# 한국 시장 특화 필터
+from src.utils.integration import reconstruct_log_close
 from src.universe.filters import apply_hard_filters
 
 
@@ -35,6 +32,7 @@ def evaluate_model_accuracy(
     model_date: str,
     target_columns: Optional[List[str]] = None,
     log_close_ref: Optional[pd.DataFrame] = None,
+    integration_order: int = 1,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -49,8 +47,12 @@ def evaluate_model_accuracy(
     target_columns : List[str], optional
         평가할 타겟 컬럼 리스트
     log_close_ref : pd.DataFrame, optional
-        log_return_1d 모드 전용. 로그 종가 역산을 위한 사다리꼴 앵커 데이터프레임.
+        log_return_1d 모드 전용. 로그 종가 역산을 위한 앵커 데이터프레임.
         필수 컬럼: ticker, date, target_log_close, target_log_return_1d
+        integration_order=2 시 추가 필수: target_log_return_1d_lag1
+    integration_order : int, default=1
+        log-close 역산 수치 적분 차수.
+        0 — 직사각형 / 1 — 사다리꼴 / 2 — Adams-Moulton 2-step
     verbose : bool
         진행 상황 출력 여부
     """
@@ -70,13 +72,19 @@ def evaluate_model_accuracy(
             f"   predictions.parquet의 날짜 범위를 확인하세요."
         )
 
-    # log_return_1d 모드: 로그 종가 기준값 + Δy(t) 앵커 조인
     use_conversion = (log_close_ref is not None)
     if use_conversion:
-        ref_cols = ['ticker', 'date', 'target_log_close']
-        if 'target_log_return_1d' in log_close_ref.columns:
-            ref_cols.append('target_log_return_1d')
-        ref = log_close_ref[ref_cols].copy()
+        ref_cols = ['ticker', 'date', 'target_log_close', 'target_log_return_1d']
+        if integration_order == 2:
+            lag1_col = 'target_log_return_1d_lag1'
+            if lag1_col not in log_close_ref.columns:
+                raise KeyError(
+                    f"integration_order=2에는 log_close_ref에 '{lag1_col}' 컬럼이 필요합니다.\n"
+                    "02단계(02_build_dataset.ipynb)를 재실행하고 "
+                    "05단계에서 log_close_ref에 해당 컬럼을 포함하세요."
+                )
+            ref_cols.append(lag1_col)
+        ref = log_close_ref[[c for c in ref_cols if c in log_close_ref.columns]].copy()
         ref['date'] = pd.to_datetime(ref['date'])
         df_eval = df_eval.merge(ref, on=['ticker', 'date'], how='left')
 
@@ -97,11 +105,17 @@ def evaluate_model_accuracy(
 
             if use_conversion and 'target_log_close' in ticker_eval.columns:
                 log_close_base = ticker_eval['target_log_close'].values
+                delta_y_t      = ticker_eval['target_log_return_1d'].values \
+                                 if 'target_log_return_1d' in ticker_eval.columns \
+                                 else np.zeros(len(ticker_eval))
 
-                if 'target_log_return_1d' in ticker_eval.columns:
-                    delta_y_t = ticker_eval['target_log_return_1d'].values
-                else:
-                    delta_y_t = np.zeros(len(ticker_eval))
+                # order=2 앵커
+                delta_y_t_minus_1 = (
+                    ticker_eval['target_log_return_1d_lag1'].values
+                    if integration_order == 2
+                    and 'target_log_return_1d_lag1' in ticker_eval.columns
+                    else None
+                )
 
                 pred_delta_h = ticker_eval[pred_col].values
                 true_delta_h = ticker_eval[true_col].values
@@ -115,9 +129,35 @@ def evaluate_model_accuracy(
                     if f'true_{c}' in ticker_eval.columns
                 )
 
-                pred_vals = trapezoid_log_close(log_close_base, cum_pred, delta_y_t, pred_delta_h)
-                true_vals = trapezoid_log_close(log_close_base, cum_pred, delta_y_t, true_delta_h)
-                
+                # order=2: delta_y_h_minus_1
+                if integration_order == 2:
+                    pred_col_prev = f'pred_{sorted_cols[idx - 1]}' if idx > 0 else None
+                    true_col_prev = f'true_{sorted_cols[idx - 1]}' if idx > 0 else None
+                    pred_dhm1 = (
+                        ticker_eval[pred_col_prev].values if pred_col_prev
+                        else delta_y_t
+                    )
+                    true_dhm1 = (
+                        ticker_eval[true_col_prev].values if true_col_prev
+                        else delta_y_t
+                    )
+                else:
+                    pred_dhm1 = None
+                    true_dhm1 = None
+
+                pred_vals = reconstruct_log_close(
+                    log_close_base, cum_pred, delta_y_t, pred_delta_h,
+                    delta_y_t_minus_1=delta_y_t_minus_1,
+                    delta_y_h_minus_1=pred_dhm1,
+                    order=integration_order,
+                )
+                true_vals = reconstruct_log_close(
+                    log_close_base, cum_true, delta_y_t, true_delta_h,
+                    delta_y_t_minus_1=delta_y_t_minus_1,
+                    delta_y_h_minus_1=true_dhm1,
+                    order=integration_order,
+                )
+
             else:
                 pred_vals = ticker_eval[pred_col].values
                 true_vals = ticker_eval[true_col].values
@@ -140,7 +180,7 @@ def evaluate_model_accuracy(
         rmse    = float(np.mean(rmse_list))
         ic_mean = float(np.mean(ic_list)) if ic_list else 0.0
 
-        # ✨ v3.10.0: Directional Accuracy — 방향성 일치율 계산
+        # ✨ v3.10.0: Directional Accuracy
         dir_matches = []
         for col in sorted_cols:
             pred_col = f'pred_{col}'
@@ -171,10 +211,8 @@ def evaluate_model_accuracy(
         print(f"\n✅ 정확도 평가 완료")
         print(f"   - 평가 종목 수: {len(df_accuracy)}")
         print(f"   - RMS RMSE: {(df_accuracy['rmse'].pow(2).mean()) ** 0.5:.4f}")
-        print(f"   - 평균 RMSE: {df_accuracy['rmse'].mean():.4f}")
         print(f"   - 평균 IC: {df_accuracy['ic_mean'].mean():.4f}")
-        da_mean = df_accuracy['directional_accuracy'].mean()
-        print(f"   - 평균 방향성 정확도: {da_mean:.4f}")
+        print(f"   - 평균 방향성 정확도: {df_accuracy['directional_accuracy'].mean():.4f}")
 
     return df_accuracy
 
@@ -191,17 +229,7 @@ def evaluate_expected_returns(
 ) -> pd.DataFrame:
     """
     미래 예측 데이터로부터 기대 수익률을 계산합니다.
-
-    Parameters
-    ----------
-    df_future_forecasts : pd.DataFrame
-        미래 예측 결과
-    min_hold_days : int, default=5
-        최소 보유 기간 (일)
-    max_daily_return : float or None, default=0.16
-        최적 거래 탐색 시 허용 가능한 일평균 수익률 상한. 상한을 초과하는 거래는 탐색에서 제외됩니다.
-    verbose : bool
-        진행 상황 출력 여부
+    (변경 없음)
     """
     max_daily_log_return = np.log1p(max_daily_return) if max_daily_return is not None else None
 
@@ -239,13 +267,13 @@ def evaluate_expected_returns(
                 failed_tickers.append((ticker, "유효한 거래 없음 (상한 초과 포함)"))
                 continue
 
-            buy_date  = ticker_data.iloc[buy_idx]['date']
-            sell_date = ticker_data.iloc[sell_idx]['date']
+            buy_date   = ticker_data.iloc[buy_idx]['date']
+            sell_date  = ticker_data.iloc[sell_idx]['date']
             buy_price  = ticker_data.iloc[buy_idx]['pred_close']
             sell_price = ticker_data.iloc[sell_idx]['pred_close']
 
-            total_log_return = log_prices[sell_idx] - log_prices[buy_idx]
-            total_return_pct = np.expm1(total_log_return) * 100
+            total_log_return  = log_prices[sell_idx] - log_prices[buy_idx]
+            total_return_pct  = np.expm1(total_log_return) * 100
             annualized_return = daily_log_return * 244.5
 
             return_metrics.append({
@@ -278,8 +306,7 @@ def evaluate_expected_returns(
     if verbose:
         print(f"\n✅ 수익성 평가 완료")
         print(f"   - 성공 종목 수: {len(df_return):,}개")
-        print(f"   - 실패 종목 수: {len(failed_tickers):,}개 (상한 초과 포함)")
-        print(f"   - 평균 시간당 로그 수익률: {df_return['daily_log_return'].mean():.6f}")
+        print(f"   - 실패 종목 수: {len(failed_tickers):,}개")
         print(f"   - 평균 총 수익률: {df_return['total_return_pct'].mean():.2f}%")
 
     return df_return
@@ -296,20 +323,12 @@ def evaluate_risk_metrics(
 ) -> pd.DataFrame:
     """
     예측 시계열로부터 종목 내재 위험도를 평가합니다.
-
-    Parameters
-    ----------
-    df_future_forecasts : pd.DataFrame
-        미래 예측 결과
-    df_meta : pd.DataFrame
-        종목 메타 정보
-    verbose : bool
-        진행 상황 출력 여부
+    (변경 없음)
     """
     if verbose:
         print(f"\n⚠️  위험도 평가 중 (5대 표준 지표)...")
 
-    risk_results       = []
+    risk_results        = []
     failed_risk_tickers = []
 
     tickers  = df_future_forecasts['ticker'].unique()
@@ -388,6 +407,7 @@ def select_investment_universe(
     max_daily_return: Optional[float] = 0.16,
     target_columns: Optional[List[str]] = None,
     log_close_ref: Optional[pd.DataFrame] = None,
+    integration_order: int = 1,
     filter_config: Optional[Dict] = None,
     verbose: bool = True,
 ) -> Dict[str, Any]:
@@ -409,11 +429,15 @@ def select_investment_universe(
     min_hold_days : int, default=5
         최소 보유 기간 (일)
     max_daily_return : float, optional, default=0.16
-        최적 거래 탐색 시 허용 가능한 일평균 수익률 상한. 상한을 초과하는 거래는 배제됩니다.
+        최적 거래 탐색 시 허용 가능한 일평균 수익률 상한.
     target_columns : List[str], optional
         평가할 타겟 컬럼 리스트
     log_close_ref : pd.DataFrame, optional
-        log_return_1d 모드 역산용 사다리꼴 앵커
+        log_return_1d 모드 역산용 앵커 데이터프레임.
+        integration_order=2 시 target_log_return_1d_lag1 컬럼 포함 필요.
+    integration_order : int, default=1
+        log-close 역산 수치 적분 차수.
+        0 — 직사각형 / 1 — 사다리꼴 / 2 — Adams-Moulton 2-step
     filter_config : dict, optional
         하드 필터 설정
     verbose : bool
@@ -427,12 +451,12 @@ def select_investment_universe(
     if verbose:
         print("\n" + "=" * 65)
         print("🚀 Universe 선정 시작")
+        print(f"   최소 보유 기간:  {min_hold_days}일")
         if max_daily_return is not None:
-            print(f"   최소 보유 기간:  {min_hold_days}일")
             print(f"   수익률 상한:     일평균 {max_daily_return:.1%}")
         else:
-            print(f"   최소 보유 기간:  {min_hold_days}일")
             print(f"   수익률 상한:     없음")
+        print(f"   integration_order: {integration_order}")
         print("=" * 65)
 
     df_accuracy = evaluate_model_accuracy(
@@ -440,6 +464,7 @@ def select_investment_universe(
         model_date=model_date,
         target_columns=target_columns,
         log_close_ref=log_close_ref,
+        integration_order=integration_order,
         verbose=verbose,
     )
 
@@ -483,7 +508,6 @@ def select_investment_universe(
     if len(df_filtered) < top_k:
         if verbose:
             print(f"   ⚠️  필터링 후 종목 수({len(df_filtered)})가 TOP_K({top_k})보다 적습니다.")
-            print(f"   → 전체 {len(df_filtered)}개 종목을 후보로 선정합니다.")
         df_candidates = df_filtered.copy()
     else:
         df_candidates = df_filtered.head(top_k).copy()
@@ -495,7 +519,6 @@ def select_investment_universe(
         print(f"   - 최종 후보 종목 수: {len(df_candidates):,}개")
         print(f"   - 평균 일평균 로그 수익률: {df_candidates['daily_log_return'].mean():.6f}")
         print(f"   - 평균 총 수익률: {df_candidates['total_return_pct'].mean():.2f}%")
-        print(f"   - 평균 리스크 점수: {df_candidates['risk_composite_raw'].mean():.4f}")
         print("\n" + "=" * 65)
 
     return {

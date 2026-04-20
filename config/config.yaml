@@ -1,12 +1,12 @@
-# SignalWeaver 프로젝트 공통 설정 — v4.0.0
+# SignalWeaver 프로젝트 공통 설정 — v4.1.0
 project:
   name: "SignalWeaver"
-  reference_date: "20260401"    # 데이터 수집 기준일. 실행마다 갱신 가능.
+  reference_date: "20260417"    # 데이터 수집 기준일. 실행마다 갱신 가능.
 
 # 01_collect_data
 data_collection:
-  start_date: "20240531"
-  end_date: "20260401"
+  start_date: "20240619"
+  end_date: "20260417"
   save_csv: True
   save_parquet: True
   min_sleep: 0.05
@@ -23,9 +23,8 @@ preprocessing:
 
 # 03a_train_tabular — Tabular 트랙 학습 설정
 training:
-  train_end: "2025-12-30"
+  train_end: "2026-01-19"
 
-  # Embargo Gap: max(horizons)만큼 훈련과 검증/테스트 사이에 자동 적용
   valid_window_days: 20
   test_window_days: 20
 
@@ -68,15 +67,10 @@ training:
 
 # ── v4.0.0 신규: 03c_train_seq — Seq 트랙 설정 ──────────────────
 sequence:
-  seq_len: 30              # 입력 시퀀스 길이 (거래일)
-  forecast_horizon: 20     # 예측 대상 기간 (training.horizons와 독립)
-  stride: 5                # 슬라이딩 윈도우 스텝 (학습 샘플 생성 간격)
-  # target_type는 항상 log_return_1d를 권장합니다.
-  # 정상성 확보 → 전 종목 단일 GRU 학습에 적합.
+  seq_len: 30
+  forecast_horizon: 20
+  stride: 5
   target_type: "log_return_1d"
-
-  # Seq 트랙도 Tabular와 동일한 날짜 분할 파라미터를 사용합니다.
-  # train_end, valid_window_days, test_window_days → training 섹션 참조.
 
 # ── v4.0.0 신규: GRU 하이퍼파라미터 ────────────────────────────
 gru_params:
@@ -89,24 +83,27 @@ gru_params:
   patience: 10
   bidirectional: false
 
+# ── v4.1.0 신규: 수치 적분 차수 ────────────────────────────────
+# target_type=log_return_1d 모드에서 log-close 역산 시 사용.
+# 0 — 직사각형 (v3.9.0): 보정 없음, 가장 빠름
+# 1 — 사다리꼴  (v3.9.1): 선형 보간, 기본값
+# 2 — Adams-Moulton 2-step (v4.1.0): 2차 보간, 가장 정확
+#     order=2는 02단계에서 target_log_return_1d_lag1 컬럼이 생성되어야 함.
+integration_order: 2
+
 # 05_universe_selection
 universe:
-  # 모델 학습 비용이 높으면 reference_date와 달라질 수 있음.
-  # 백테스팅 시 reference_date는 변하지만 model_date는 고정 가능.
-  model_date: "20260331"
+  model_date: "20260417"
 
 strategy:
   min_hold_days: 5
   max_daily_return: 0.16
   top_k: 200
 
-# 활성화 모델 (단일: lgbm, rf, mlp, gru / 앙상블: lgbm+rf 등)
+# 활성화 모델
 active_model: "gru"
-
-# v4.0.0: Seq 트랙 전용 활성화 모델 (03c에서 사용)
 active_seq_model: "gru"
 
-# ── v4.0.0 수정: model_dir 제거, 99_meta → 00_prep 재편 ─────────
 paths:
   raw_dir: "data/01_raw"
   processed_dir: "data/02_processed"
@@ -114,23 +111,13 @@ paths:
   seq_dir: "data/03_seq"
   forecasts_dir: "data/04_forecasts"
   universe_dir: "data/05_universe"
-  # 99_meta → 00_prep: 시간 독립(krx_calendar.csv)은 prep_dir 직접,
-  # 날짜 의존(macro_regime 등)은 prep_dir/{ref_date}/ 하위
   prep_dir: "data/00_prep"
 
-# 캘린더 설정
-# start_date / end_date: krx_calendar.csv의 커버리지 범위.
-# 긴 달력을 한 번 생성하고 코드에서 필요한 범위를 필터링하여 사용합니다.
-# 달력 갱신이 필요한 경우(end_date 경과 시)만 00a를 재실행합니다.
 calendar:
-  # 달력 생성 범위 (00a 전용). 충분히 긴 기간으로 설정하고 필요 시 연장.
   start_date:   "2021-01-02"
   end_date:     "2028-12-30"
-  # 매크로 미래 추정 및 주가 예측 상한 (00c, 04단계 공용).
-  # 실제 투자 기간에 맞게 ref_date 변경 시 함께 조정.
-  forecast_end: "2026-04-29"
+  forecast_end: "2026-05-19"
   prefer_mcal: True
 
-# 디버그
 debug:
   save_raw_predictions: false

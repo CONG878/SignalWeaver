@@ -165,6 +165,7 @@ def main():
         forecast_horizon = seq_cfg["forecast_horizon"],
         stride           = seq_cfg.get("stride", 1),
         date_col         = "date",
+        integration_order=cfg.get('integration_order', 1),   # ← 추가
     )
 
     # ── 학습 실행 ────────────────────────────────────────────
