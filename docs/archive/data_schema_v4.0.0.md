@@ -1,26 +1,36 @@
-# 📄 Data Schema — v4.1.1
+# 📄 Data Schema — v4.0.0 (Confirmed)
 
 > **문서 유형**: 확정 스키마 (구현 완료 기준)
-> **작성 기준일**: 2026-04-23
-> **확정 기준일**: 2026-04-25
-> **Schema Version**: 4.1.1
-> **이전 안정 버전**: v4.0.0
+> **작성 기준일**: 2026-03-25
+> **확정 기준일**: 2026-04-01
+> **Schema Version**: 4.0.0
+> **이전 안정 버전**: v3.10.0
 
 ---
 
-## 0. v4.1.1 변경 범위 요약
+## 0. v4.0.0 변경 범위 요약
 
 | 카테고리 | 항목 | 성격 |
 |----------|------|------|
-| **신규** | `src/utils/export.py` | 유틸리티 |
-| **수정** | `src/models/artifact.py` — `save_predictions()` 추가 | 인프라 |
-| **수정** | `config.yaml` — `output.save_csv` 섹션 추가, 단계별 분산 키 제거 | 설정 |
-| **수정** | `src/utils/config.py` — `get_seq_csv_dir()` 추가 | 인프라 |
-| **수정** | `src/data_loader/collector.py` — `should_save_csv` 적용 | 인프라 |
-| **수정** | `src/features/builder.py` — `save_processed_data()` 내부 정리 | 인프라 |
-| **수정** | `scripts/train_seq.py` — `save_predictions()` 적용 | 실행 |
-| **보류** | 기존 모델 pickle → 포맷별 마이그레이션 | v4.2.0 |
-| **보류** | EnsembleModel Seq 모델 통합 | v4.2.0 |
+| **신규** | SeqModelBase 계층 | 아키텍처 |
+| **신규** | GRUModel (On-the-fly DataLoader, 체크포인트) | 모델 |
+| **신규** | SeqDataset (인덱스 기반 on-the-fly) | 데이터 |
+| **신규** | split_by_date() → SeqDataset 직접 반환 | 데이터 |
+| **신규** | SeqTrainer (n_folds, resume) | 파이프라인 |
+| **신규** | scripts/train_seq.py (03c 노트북 대체) | 실행 |
+| **개명** | 노트북 번호 체계 (00계열 + a/b/c 접미사) | 스키마 |
+| **개명** | 03_train_predict → 03a_train_tabular | 스키마 |
+| **개명** | 99_meta → 00_prep (시간독립/날짜의존 분리) | 스키마 |
+| **개명** | 01단계 산출물 파일명 날짜 중복 제거 | 스키마 |
+| **개명** | 모델 파일명 v1 제거 | 스키마 |
+| **개명** | change_pct → change_rate (자동 검증) | 스키마 |
+| **수정** | config.yaml 대폭 확장 | 설정 |
+| **수정** | ProjectPaths 전면 재편 | 인프라 |
+| **수정** | get_predictions_parquet → get_test_predictions_parquet | 인프라 |
+| **수정** | paths.model_dir 중복 제거 | 설정 |
+| **수정** | Parquet 저장 엔진: fastparquet 명시 | 인프라 |
+| **보류** | 기존 모델 pickle → 포맷별 마이그레이션 | v4.1.0 |
+| **보류** | EnsembleModel Seq 모델 통합 | v4.1.0 |
 
 ---
 
@@ -225,27 +235,7 @@ pickle 미사용. 디렉토리 단위 저장.
 
 ## 5. config.yaml 확정
 
-기존 `data_collection.save_csv`, `preprocessing.save_csv` 키를 제거하고
-최상위 `output.save_csv` 섹션으로 통합합니다.
-
 ```yaml
-# ── v4.1.1 신규: 단계별 CSV 저장 제어 ──────────────────────────────
-# True  : 종목별 개별 CSV 파일 추가 저장 (전 종목 Parquet은 항상 저장됨)
-# False : Parquet만 저장 (기본값. 디스크 절약, 처리 속도 향상)
-# 05단계(Universe 선정)는 후보 종목만 다루므로 해당 없음.
-output:
-  save_csv:
-    stage_01: true    # data/01_raw/{ref_date}/csv/
-    stage_02: true    # data/02_processed/{ref_date}/csv/
-    stage_03: false   # data/03_training or 03_seq/.../csv/
-    stage_04: false   # data/04_forecasts/{ref_date}/{model}/csv/
-
-# 제거된 키 (output.save_csv로 통합)
-# data_collection:
-#   save_csv: ...    ← 삭제
-# preprocessing:
-#   save_csv: ...    ← 삭제
-
 project:
   reference_date: "20260323"    # 데이터 수집 기준일
 
@@ -373,59 +363,58 @@ Tabular 트랙과 동일하여 05단계가 구분 없이 처리 가능.
 
 ## 8. 인프라
 
-### 8.1 CSV 저장 모듈 — `src/utils/export.py` (신규)
-
-단계별 CSV 저장 공통 유틸리티.
+### 8.1 ProjectPaths 변경 요약
 
 ```python
-# 주요 함수
-save_ticker_csv(df, output_dir, ticker_name_map, ticker_col, encoding, desc)
-    → DataFrame을 종목별로 분할해 개별 CSV 저장.
+# 제거
+meta_dir        # → prep_dir / prep_dated_dir으로 분리
+paths.model_dir # → training_dir로 통일
 
-should_save_csv(config, stage)
-    → config.yaml의 output.save_csv.stage_XX 플래그 반환 (bool).
+# 추가
+prep_dir: Path          # data/00_prep/
+prep_dated_dir: Path    # data/00_prep/{ref_date}/
+seq_dir: Path           # data/03_seq/{model_date}/{seq_model}/
 
-load_ticker_name_map(paths)
-    → ticker_master.csv에서 {ticker: name} 매핑 로드. 실패 시 {}.
-```
-
-### 8.2 predictions 저장 — `src/models/artifact.py`에 `save_predictions()` 추가
-
-03단계 predictions 저장의 단일 진입점.
-
-```python
-save_predictions(
-    val_df,          # 검증 폴드 DataFrame (None이면 건너뜀)
-    test_df,         # 테스트 폴드 DataFrame
-    val_path,        # val_predictions.parquet 경로
-    test_path,       # test_predictions.parquet 경로
-    config,          # load_config() 결과
-    paths,           # ProjectPaths 인스턴스
-    parquet_kwargs,  # to_parquet() 추가 인수 (Seq 트랙: {"engine": "fastparquet"})
-)
-```
-
-내부 동작:
-1. parquet 저장 (항상)
-2. `should_save_csv(config, 3)` == True이면 `test_path.parent / "csv/"` 하위에 종목별 CSV 추가 저장. val은 `csv/val/` 하위.
-
-### 8.3 ProjectPaths 변경 (v4.1.1)
-
-```python
 # 추가 메서드
-get_seq_csv_dir() → seq_dir / "csv"   # Seq 트랙 종목별 CSV 저장 경로
+get_calendar()           → prep_dir / "krx_calendar.csv"
+get_macro_parquet()      → prep_dated_dir / "macro_regime.parquet"
+get_macro_forecast_parquet() → prep_dated_dir / "macro_regime_forecast.parquet"
+get_seq_model_dir()      → seq_dir
+get_seq_val_predictions() → seq_dir / "val_predictions.parquet"
+get_seq_test_predictions() → seq_dir / "test_predictions.parquet"
+
+# 개명
+get_predictions_parquet() → get_test_predictions_parquet()
+get_raw_parquet()        → raw_dir / "prices.parquet"
+get_ticker_master()      → raw_dir / "ticker_master.csv"
 ```
 
-### 8.4 단계별 저장 경로 전체 정리
+### 8.2 Parquet 저장 엔진
 
-| 단계 | Parquet (항상) | CSV (`stage_XX=true` 시) |
-|------|---------------|--------------------------|
-| 01 | `data/01_raw/{ref}/prices.parquet` | `data/01_raw/{ref}/csv/` |
-| 02 | `data/02_processed/{ref}/dataset.parquet` | `data/02_processed/{ref}/csv/` |
-| 03a | `data/03_training/{model}/{name}/test_predictions.parquet` | `.../csv/` |
-| 03b | `data/03_training/{model}/{ensemble}/test_predictions.parquet` | `.../csv/` |
-| 03c | `data/03_seq/{model}/gru/test_predictions.parquet` | `.../csv/` |
-| 04 | `data/04_forecasts/{ref}/{model}/future_forecasts.parquet` | `.../csv/` |
+Seq 트랙 predictions는 `fastparquet` 엔진 필요.
+
+```python
+df.to_parquet(path, index=False, engine="fastparquet")
+```
+
+Tabular 트랙은 기본 엔진(`pyarrow`) 유지. 혼용 시 읽기 엔진을 통일해야 합니다.
+
+### 8.3 04단계 NaN 처리
+
+Seq 트랙 예측 시 입력 시퀀스 윈도우에 NaN이 있을 수 있음. `ffill → bfill → fillna(0)` 적용.
+
+```python
+X_window_df = X_window_df.ffill().bfill().fillna(0)
+```
+
+### 8.4 config.py 신규 헬퍼
+
+```python
+_SEQ_MODEL_NAMES = frozenset({"gru", "lstm"})
+
+def is_seq_model(active_model_str: str) -> bool:
+    """순수 seq 모델 단독 여부. is_ensemble()과 대칭."""
+```
 
 ---
 
@@ -458,13 +447,11 @@ macro_regime_forecast.parquet: 날짜 의존, data/00_prep/{ref_date}/
 ```
 v3.10.0  2026-03-16  MINOR   Stable Baseline (Seq 트랙 도입 전 기준점)
 v4.0.0   2026-04-01  MAJOR   Seq 모델 트랙 + 스키마 전반 정비 (확정)
-v4.1.0   2026-04-20  MINOR   2차식 적분, 적분 모듈 확장
-v4.1.1   2026-04-23  PATCH  CSV 저장 모듈화: export.py 신설, save_predictions() 추가,
-                             output.save_csv 플래그로 단계별 제어 통합
+v4.1.0   미정        MINOR   EnsembleModel Seq 통합, pickle 마이그레이션
 ```
 
 ---
 
-*Schema Version: 4.1.1*
+*Schema Version: 4.0.0*
 *Status: ✅ Confirmed*
 *Maintained by: SignalWeaver Team*

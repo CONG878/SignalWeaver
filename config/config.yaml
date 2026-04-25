@@ -1,14 +1,25 @@
 # SignalWeaver 프로젝트 공통 설정 — v4.1.0
 project:
   name: "SignalWeaver"
-  reference_date: "20260417"    # 데이터 수집 기준일. 실행마다 갱신 가능.
+  reference_date: "20260424"    # 데이터 수집 기준일. 실행마다 갱신 가능.
+
+# ── 단계별 CSV 저장 제어 ────────────────────────────────────────────
+# True  : 종목별 개별 CSV 파일 추가 저장 (전 종목 Parquet은 항상 저장됨)
+# False : Parquet만 저장 (기본값. 디스크 절약, 처리 속도 향상)
+# 05단계(Universe 선정)는 산출물이 후보 종목만이므로 해당 없음.
+output:
+  save_csv:
+    stage_01: true    # data/01_raw/{ref_date}/csv/
+    stage_02: true    # data/02_processed/{ref_date}/csv/
+    stage_03: false   # data/03_training/{model_date}/{model}/csv/  (Tabular)
+                      # data/03_seq/{model_date}/{model}/csv/       (Seq)
+    stage_04: true   # data/04_forecasts/{ref_date}/{model}/csv/
 
 # 01_collect_data
 data_collection:
-  start_date: "20240619"
-  end_date: "20260417"
-  save_csv: True
-  save_parquet: True
+  start_date: "20240626"
+  end_date: "20260424"
+  save_parquet: true
   min_sleep: 0.05
   max_sleep: 0.8
 
@@ -18,12 +29,11 @@ preprocessing:
   technical_windows: [5, 60]
   volume_window: 20
   rsi_period: 14
-  save_csv: True
-  save_parquet: True
+  save_parquet: true
 
 # 03a_train_tabular — Tabular 트랙 학습 설정
 training:
-  train_end: "2026-01-19"
+  train_end: "2026-01-26"
 
   valid_window_days: 20
   test_window_days: 20
@@ -116,8 +126,8 @@ paths:
 calendar:
   start_date:   "2021-01-02"
   end_date:     "2028-12-30"
-  forecast_end: "2026-05-19"
-  prefer_mcal: True
+  forecast_end: "2026-05-26"
+  prefer_mcal: true
 
 debug:
   save_raw_predictions: false

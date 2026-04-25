@@ -4,6 +4,7 @@ Configuration & Path Management
 YAML 설정 파일 로드, 경로 중앙 관리, 모델명 정규화를 담당합니다.
 
 ## 버전
+- v4.1.0: get_seq_csv_dir() 추가 (Seq 트랙 종목별 CSV 저장 경로).
 - v4.0.0: Seq 트랙 경로 추가, is_seq_model() 신설,
           paths.model_dir 중복 제거, get_test_predictions_parquet() 명칭 명확화,
           파일명에서 날짜 중복 제거 (prices.parquet, ticker_master.csv),
@@ -99,6 +100,9 @@ def get_folder_name(active_model_str: str) -> str:
 class ProjectPaths:
     """
     프로젝트 경로 관리 (중앙화)
+
+    v4.1.0 변경 사항:
+    - get_seq_csv_dir() 추가 (Seq 트랙 종목별 CSV 저장 경로)
 
     v4.0.0 변경 사항:
     - seq_dir / get_seq_*() 추가 (Seq 트랙 전용)
@@ -231,6 +235,10 @@ class ProjectPaths:
 
     def get_seq_test_predictions(self) -> Path:
         return self.seq_dir / "test_predictions.parquet"
+
+    def get_seq_csv_dir(self) -> Path:
+        """v4.1.0: Seq 트랙 종목별 CSV 저장 디렉토리."""
+        return self.seq_dir / "csv"
 
     # ──────────────────────────────────────────
     # Step 4: Forecasts

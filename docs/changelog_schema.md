@@ -1,9 +1,224 @@
-# Schema Changelog (Updated v4.0.0)
+﻿# Schema Changelog (Updated v4.1.1)
 
 All notable changes to the data schema will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [4.1.1] - 2026-04-23
+
+### 🔵 PATCH Changes — CSV 저장 모듈화 및 단계별 플래그 제어
+
+변경 범위: **01단계, 02단계, 03a/03b/03c 단계, 04단계,
+           src/utils/export.py (신규),
+           src/models/artifact.py,
+           src/data_loader/collector.py,
+           src/features/builder.py,
+           src/utils/config.py,
+           scripts/train_seq.py,
+           config/config.yaml**
+
+산출물 스키마 변경 없음. 기존 parquet·모델 파일 재실행 불필요.
+
+---
+
+### 1. `src/utils/export.py` 신설 — 공통 CSV 저장 유틸리티
+
+**배경:** 01단계(`collect_all`)와 02단계(`save_processed_data`)에는 종목별 CSV 저장 로직이 있었지만 03·04단계에는 없었습니다. 또한 단계마다 `tqdm` 루프, `ticker_name_map` 로드, 경로 생성이 각각 중복 구현되어 있었습니다.
+
+**수정 내용:**
+- `save_ticker_csv(df, output_dir, ticker_name_map, ...)` — 종목별 CSV 분할 저장 공통 함수.
+- `should_save_csv(config, stage)` — `config.yaml`의 `output.save_csv.stage_XX` 플래그를 읽어 저장 여부를 반환.
+- `load_ticker_name_map(paths)` — `ticker_master.csv`에서 `{ticker: name}` 매핑 로드. 파일 없으면 빈 dict 반환.
+
+---
+
+### 2. `src/models/artifact.py` — `save_predictions()` 추가
+
+**배경:** 03a/03b/03c 노트북에서 predictions parquet 저장 코드가 셀마다 직접 작성되어 있었고, CSV 저장 로직이 없었습니다(03a는 test만, 03c는 fastparquet 엔진 필요 등 단계별로 제각각). `save_model_artifact()`가 모델 저장의 단일 진입점인 것처럼, predictions 저장도 단일 진입점으로 통합했습니다.
+
+**수정 내용:**
+- `save_predictions(val_df, test_df, val_path, test_path, config, paths, parquet_kwargs)` 추가.
+  - parquet 저장은 항상 실행.
+  - `should_save_csv(config, 3)`이 True일 때 종목별 CSV를 `test_path.parent / "csv/"` 하위에 추가 저장. val도 동일하게 `csv/val/` 하위에 저장.
+  - `parquet_kwargs`로 Seq 트랙의 `{"engine": "fastparquet"}` 등 to_parquet 인수를 투명하게 전달.
+
+**03a/03b/03c 노트북 변경 요약:**
+
+| 노트북 | 교체 전 | 교체 후 |
+|--------|---------|---------|
+| `03a` | parquet 저장 + tqdm CSV 루프 (24줄) | `save_predictions(...)` (7줄) |
+| `03b` | parquet 저장만 (7줄) | `save_predictions(...)` (7줄, CSV 저장 추가) |
+| `03c` | fastparquet 저장만 (9줄) | `save_predictions(..., parquet_kwargs={"engine": "fastparquet"})` (8줄, CSV 저장 추가) |
+
+각 노트북의 변경은 **import 한 줄 추가 + 저장 블록 교체**가 전부입니다.
+
+---
+
+### 3. `config/config.yaml` — `output.save_csv` 섹션 추가
+
+**배경:** 기존에는 `data_collection.save_csv`(01단계)와 `preprocessing.save_csv`(02단계)가 각 섹션에 분산되어 있었고, 03·04단계에는 플래그 자체가 없었습니다.
+
+**수정 내용:**
+- 최상위에 `output.save_csv` 섹션 신설. 모든 단계의 CSV 저장 제어를 한 곳에서 관리.
+- 기존 `data_collection.save_csv`, `preprocessing.save_csv` 키 제거.
+
+```yaml
+output:
+  save_csv:
+    stage_01: true    # data/01_raw/{ref_date}/csv/
+    stage_02: true    # data/02_processed/{ref_date}/csv/
+    stage_03: false   # data/03_training or 03_seq/.../csv/
+    stage_04: false   # data/04_forecasts/{ref_date}/{model}/csv/
+```
+
+---
+
+### 4. `src/utils/config.py` — `get_seq_csv_dir()` 추가
+
+- `data/03_seq/{model_date}/{seq_model}/csv/` 경로를 반환하는 메서드 추가.
+- Seq 트랙의 종목별 CSV 저장 경로를 `ProjectPaths`가 통일 관리하도록 편입.
+
+---
+
+### 5. `src/data_loader/collector.py` — `should_save_csv` 적용
+
+- 기존 `config['data_collection']['save_csv']` 참조를 `should_save_csv(config, 1)` 호출로 교체.
+- `save_ticker_csv()` 대신 수집 루프 중 스트리밍 방식을 유지 (메모리 효율).
+
+---
+
+### 6. `src/features/builder.py` — `save_processed_data()` 내부 정리
+
+- `save_processed_data()`의 종목별 CSV 저장 블록을 `should_save_csv(config, 2)` + `save_ticker_csv()` 호출로 교체.
+- 기존 `config['preprocessing']['save_csv']` 참조 제거.
+
+---
+
+### 7. `scripts/train_seq.py` — `save_predictions()` 적용
+
+- 학습 완료 후 parquet 저장 블록과 (없었던) CSV 저장 블록을 `save_predictions()` 단일 호출로 통합.
+- `--eval-only` 경로도 동일하게 적용.
+
+---
+
+### 호환성 노트
+
+- 산출물 스키마 변경 없음. 기존 parquet 파일 그대로 사용 가능.
+- `data_collection.save_csv`, `preprocessing.save_csv` 키는 제거되었으므로, 기존 config.yaml을 그대로 사용하면 해당 키가 무시됩니다. `output.save_csv` 섹션을 추가하면 됩니다.
+- `stage_03`, `stage_04`의 기본값은 `false`이므로 config를 수정하지 않으면 03·04단계에서 CSV는 생성되지 않습니다. 01·02단계의 기존 동작(저장함)을 재현하려면 `stage_01: true`, `stage_02: true`로 설정하세요.
+
+---
+
+## [4.1.0] - 2026-04-13
+
+### 🟢 MINOR Changes — 수치 적분 차수 선택 지원 + Adams-Moulton 2-step 도입
+
+변경 범위: **02단계, 03a/03b/03c 단계, 04단계, 05단계,
+           src/utils/integration.py (신규),
+           src/utils/trapezoidal.py (deprecation shim),
+           src/modeling/trainer.py,
+           src/modeling/seq_trainer.py,
+           config/config.yaml**
+
+02단계 스키마 변경 있음 (`target_log_return_1d_lag1` 컬럼 추가). **전체 재실행 필요.**
+
+---
+
+### 1. `src/utils/integration.py` 신설 — trapezoidal.py 대체
+
+**배경:** `trapezoidal.py`는 order=1(사다리꼴)에만 해당하는 이름으로 확장이 불가능했습니다.
+세 가지 수치 적분 차수를 단일 함수로 지원하고, 모듈 이름도 범용화했습니다.
+
+**수정 내용:**
+- `reconstruct_log_close(log_close_base, cum_pred, delta_y_t, delta_y_h,
+  delta_y_t_minus_1=None, delta_y_h_minus_1=None, order=1)` 신설.
+- `order` 파라미터로 세 가지 수치 적분 방식 선택:
+  - `order=0`: 직사각형 적분 (v3.9.0, 보정 없음)
+  - `order=1`: 사다리꼴 적분 (v3.9.1, 기본값, `(− δ_{t+N} + δ_t) / 2`)
+  - `order=2`: Adams-Moulton 2-step (v4.1.0, `(− 7δ_{t+N} + δ_{t+N-1} + 7δ_t − δ_{t-1}) / 12`)
+- `trapezoidal.py`는 deprecation shim으로 유지 (`trapezoid_log_close` re-export).
+
+**수식 근거 (order=2):**
+3점 Lagrange 보간의 적분인 Adams-Moulton 2-step을 재귀 전개하면:
+
+$$y(t+N) = y(t) + \underbrace{\sum_{k=1}^{N}\Delta y(t+k)}_{\text{cum\_pred}} + \frac{- 7\Delta y(t+N) + \Delta y(t+N-1) + 7\Delta y(t) - \Delta y(t-1)}{12}$$
+
+order=1 대비 추가 앵커: `δ_{t-1}` = `target_log_return_1d_lag1`, `δ_{t+N-1}` = `raw_preds[h_idx-1]`.
+
+---
+
+### 2. `02_build_dataset.ipynb` — `target_log_return_1d_lag1` 컬럼 추가
+
+**배경:** order=2 보정항에 `δ_{t-1}` 앵커가 필요합니다. 02단계에서 생성하는 것이
+trainer/select_universe 모든 곳에서 일관되게 참조할 수 있어 가장 단순합니다.
+
+**수정 내용:**
+```python
+# "Target 기준값 생성" 셀에 추가
+df_final['target_log_return_1d_lag1'] = (
+    df_final.groupby('ticker')['target_log_return_1d'].shift(1)
+)
+```
+NaN (각 종목 첫 행)은 학습 시 `dropna()`로 자동 제거됩니다.
+
+---
+
+### 3. `config/config.yaml` — `integration_order` 항목 추가
+
+```yaml
+# v4.1.0 신규
+integration_order: 1   # 0 | 1 | 2
+```
+
+전체 파이프라인이 이 단일 값을 참조합니다.
+
+---
+
+### 4. `src/modeling/trainer.py` — `integration_order` 파라미터 추가
+
+- `WalkForwardTrainer.__init__`에 `integration_order: int = 1` 추가.
+- `_evaluate()` 내 `reconstruct_log_close()` 호출 시 order와 lag1 앵커 전달.
+- order=2일 때 `target_log_return_1d_lag1` 컬럼 존재 여부를 `run()` 진입 시 검증.
+- `run()` 반환 dict에 `integration_order` 키 추가.
+
+---
+
+### 5. `src/modeling/seq_trainer.py` — 동일
+
+- `SeqTrainer.__init__`에 `integration_order: int = 1` 추가.
+- `_to_log_close()` 내 `reconstruct_log_close()` 호출 시 order와 lag1 앵커 전달.
+- `run()` 반환 dict에 `integration_order` 키 추가.
+
+---
+
+### 6. 노트북 변경 요약
+
+| 파일 | 변경 내용 |
+|------|----------|
+| `03a_train_tabular.ipynb` | `WalkForwardTrainer` 초기화에 `integration_order` 전달. finalize 셀 `reconstruct_log_close` 교체. |
+| `03b_train_ensemble.ipynb` | import를 `integration.py`로 교체 (역산 로직 없으므로 shim으로 호환 가능). |
+| `03c_train_seq.ipynb` | `SeqTrainer` 초기화에 `integration_order` 전달. |
+| `04_forecast_future.ipynb` | `prev_prev_delta_y` 변수 추가. `reconstruct_log_close` 교체. 청크 마지막에 `prev_prev_delta_y` 갱신. |
+
+---
+
+### 7. `src/universe/select_universe.py` 변경
+
+- import를 `integration.py`로 교체.
+- `evaluate_model_accuracy()`에 `integration_order: int = 1` 추가.
+- `select_investment_universe()`에 `integration_order: int = 1` 추가 및 하위 전달.
+- order=2 사용 시 `log_close_ref`에 `target_log_return_1d_lag1` 컬럼 포함 필요.
+
+---
+
+### 호환성 노트
+
+- `trapezoidal.py`는 deprecation shim으로 유지되므로 기존 `from src.utils.trapezoidal import trapezoid_log_close` 호출은 경고와 함께 동작합니다.
+- `integration_order: 1`(기본값)은 v3.9.1과 동일한 동작을 보장합니다.
+- `integration_order: 2`로 변경 시 02단계 재실행 필수 (`target_log_return_1d_lag1` 생성).
 
 ---
 

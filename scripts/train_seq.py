@@ -23,10 +23,11 @@ python scripts/train_seq.py --eval-only
 
 ## 출력 경로
 data/03_seq/{model_date}/{seq_model}/
-  weights.pt          추론 전용 최선 가중치
-  config.json         모델 메타데이터
-  checkpoint.pt       resume 용 (학습 중 자동 갱신)
-  test_predictions.parquet  05단계 입력
+  weights.pt                  추론 전용 최선 가중치
+  config.json                 모델 메타데이터
+  checkpoint.pt               resume 용 (학습 중 자동 갱신)
+  test_predictions.parquet    05단계 입력
+  csv/                        종목별 CSV (output.save_csv.stage_03=true 시에만 생성)
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.config import load_config, ProjectPaths
+from src.utils.export import save_ticker_csv, should_save_csv, load_ticker_name_map
 from src.models.gru_model import GRUModel
 from src.modeling.seq_trainer import SeqTrainer
 
@@ -69,6 +71,16 @@ def parse_args():
     p.add_argument("--n-folds",   type=int, default=1, choices=[1, 2],
                    help="Fold 수. 1=1-Fold(기본), 2=2-Fold(앙상블 대비)")
     return p.parse_args()
+
+
+# ──────────────────────────────────────────────────────────────
+# CSV 저장 헬퍼
+# ──────────────────────────────────────────────────────────────
+
+def _save_predictions_csv(predictions_df: pd.DataFrame, csv_dir: Path, paths, desc: str) -> None:
+    """test/val predictions DataFrame을 종목별 CSV로 저장합니다."""
+    ticker_name_map = load_ticker_name_map(paths)
+    save_ticker_csv(predictions_df, csv_dir, ticker_name_map, desc=desc)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -108,6 +120,7 @@ def main():
     print(f"   epochs:          {gru_cfg['epochs']}")
     print(f"   resume:          {args.resume}")
     print(f"   n_folds:         {args.n_folds}")
+    print(f"   CSV 저장:        {should_save_csv(cfg, 3)}")
     print(f"   입력:  {paths.get_dataset_parquet()}")
     print(f"   출력:  {paths.get_seq_model_dir()}")
     print()
@@ -141,7 +154,7 @@ def main():
 
     # ── eval-only 모드 ───────────────────────────────────────
     if args.eval_only:
-        _run_eval_only(paths, gru_cfg, seq_cfg, feature_cols, df, target_col, train_cfg)
+        _run_eval_only(cfg, paths, gru_cfg, seq_cfg, feature_cols, df, target_col, train_cfg)
         return
 
     # ── 모델 초기화 ──────────────────────────────────────────
@@ -165,7 +178,7 @@ def main():
         forecast_horizon = seq_cfg["forecast_horizon"],
         stride           = seq_cfg.get("stride", 1),
         date_col         = "date",
-        integration_order=cfg.get('integration_order', 1),   # ← 추가
+        integration_order=cfg.get('integration_order', 1),
     )
 
     # ── 학습 실행 ────────────────────────────────────────────
@@ -202,6 +215,22 @@ def main():
     else:
         print("   ⏭️  val_predictions 생략 (1-Fold 모드)")
 
+    # ── 종목별 CSV 저장 (output.save_csv.stage_03 플래그) ───
+    if should_save_csv(cfg, 3):
+        csv_dir = paths.get_seq_csv_dir()
+        print(f"📂 종목별 CSV 저장 중 → {csv_dir}")
+        _save_predictions_csv(
+            results["test_predictions"], csv_dir, paths,
+            desc="Saving seq test prediction CSVs",
+        )
+        if results["val_predictions"] is not None:
+            _save_predictions_csv(
+                results["val_predictions"], csv_dir / "val", paths,
+                desc="Saving seq val prediction CSVs",
+            )
+    else:
+        print("⏭️  종목별 CSV 저장 비활성화 (output.save_csv.stage_03=false)")
+
     # ── 성능 요약 ────────────────────────────────────────────
     m = results["test_metrics"]
     print(f"\n📊 성능 요약")
@@ -219,7 +248,7 @@ def main():
     print(f"  active_seq_model: '{active_seq}' 확인 후 실행하세요.")
 
 
-def _run_eval_only(paths, gru_cfg, seq_cfg, feature_cols, df, target_col, train_cfg):
+def _run_eval_only(cfg, paths, gru_cfg, seq_cfg, feature_cols, df, target_col, train_cfg):
     """학습 없이 기존 모델로 평가 및 저장."""
     seq_model_dir = paths.get_seq_model_dir()
     weights_path  = seq_model_dir / "weights.pt"
@@ -242,7 +271,6 @@ def _run_eval_only(paths, gru_cfg, seq_cfg, feature_cols, df, target_col, train_
         stride           = seq_cfg.get("stride", 1),
     )
 
-    # 평가만 수행 (epochs=0 불가 → 직접 평가)
     from src.data_loader.seq_builder import split_by_date
     splits = split_by_date(
         df=df, feature_cols=feature_cols, target_col=target_col,
@@ -260,8 +288,18 @@ def _run_eval_only(paths, gru_cfg, seq_cfg, feature_cols, df, target_col, train_
 
     test_path = paths.get_seq_test_predictions()
     predictions.to_parquet(test_path, engine='fastparquet', index=False)
-
     print(f"   ✅ test_predictions: {test_path}")
+
+    # ── 종목별 CSV 저장 (output.save_csv.stage_03 플래그) ───
+    if should_save_csv(cfg, 3):
+        csv_dir = paths.get_seq_csv_dir()
+        print(f"📂 종목별 CSV 저장 중 → {csv_dir}")
+        ticker_name_map = load_ticker_name_map(paths)
+        save_ticker_csv(predictions, csv_dir, ticker_name_map,
+                        desc="Saving seq prediction CSVs")
+    else:
+        print("⏭️  종목별 CSV 저장 비활성화 (output.save_csv.stage_03=false)")
+
     print(f"   테스트 Avg RMSE: {metrics['avg_rmse']:.6f}")
     print(f"   테스트 Avg IC:   {metrics['avg_ic']:.4f}")
     print("\n✅ eval-only 완료")

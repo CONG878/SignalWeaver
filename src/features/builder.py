@@ -9,6 +9,11 @@ v3.6.0 원칙에 따라 가격 스케일에 종속되지 않는 무차원(Scale-
     2. 메타 지표 (유동성 점수, 리스크 팩터, 상장 폐지/거래 정지 플래그)
     3. 스케일 보정 피처 (log_liquidity 등 모델에 직접 투입되는 메타 파생 피처)
 
+## v4.1.0 변경 사항
+- save_processed_data(): output.save_csv.stage_02 플래그로 CSV 저장 제어.
+  preprocessing.save_csv 설정 키 제거 (output.save_csv.stage_02로 통합).
+  save_ticker_csv() 모듈 사용 (src/utils/export.py).
+
 ## v3.10.0 변경 사항
 - build_universe_meta(): risk_composite 역할 분리
     - feature_risk_composite : 모델 학습 피처 (feature_ 접두사, 학습에 사용)
@@ -22,6 +27,8 @@ from tqdm import tqdm
 from src.features.technical import (
     calc_rsi, calc_macd, calc_bollinger, calc_sma, calc_volume_ratio
 )
+from src.utils.export import save_ticker_csv, should_save_csv
+
 
 def build_features(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     """Scale-Invariant 기술적 지표 모음 생성"""
@@ -138,25 +145,53 @@ def build_universe_meta(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def save_processed_data(df: pd.DataFrame, config: dict, ticker_name_map: dict = None, paths = None):
-    """최종 가공된 데이터 파켓(전체) 및 CSV(개별) 저장"""
+def save_processed_data(
+    df: pd.DataFrame,
+    config: dict,
+    ticker_name_map: dict = None,
+    paths=None,
+):
+    """
+    최종 가공된 데이터를 Parquet(전체) 및 CSV(종목별)로 저장합니다.
+
+    ## v4.1.0 변경
+    - CSV 저장 여부를 output.save_csv.stage_02 플래그로 제어.
+      True이면 save_ticker_csv()로 종목별 CSV 저장.
+      False이면 Parquet만 저장합니다.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        저장할 전체 데이터프레임.
+    config : dict
+        load_config() 결과.
+    ticker_name_map : dict, optional
+        {ticker: name} 매핑. CSV 파일명에 종목명을 사용합니다.
+    paths : ProjectPaths, optional
+        None이면 config에서 자동 생성합니다.
+    """
     if paths is None:
         from src.utils.config import ProjectPaths
         paths = ProjectPaths.from_config(config)
-        
+
+    # ── Parquet 저장 (항상 실행) ─────────────────────────────────────
     if config['preprocessing'].get('save_parquet', True):
         parquet_path = paths.get_dataset_parquet()
         df.to_parquet(parquet_path, compression='snappy', index=False)
         print(f"✅ Integrated Parquet Saved: {parquet_path}")
-        
-    if config['preprocessing'].get('save_csv', False):
+
+    # ── 종목별 CSV 저장 (output.save_csv.stage_02 플래그로 제어) ────
+    if should_save_csv(config, 2):
         csv_dir = paths.get_processed_csv_dir()
-        csv_dir.mkdir(parents=True, exist_ok=True)
-        print(f"📂 Saving Debug CSVs to {csv_dir}...")
-        for ticker, group in tqdm(df.groupby('ticker'), desc="Saving CSVs"):
-            name = ticker_name_map.get(ticker, ticker) if ticker_name_map else ticker
-            safe_name = str(name).replace('/', '_').replace('\\', '_')
-            group.to_csv(csv_dir / f"{safe_name}.csv", index=False, encoding='utf-8-sig')
+        print(f"📂 Saving ticker CSVs to {csv_dir}...")
+        save_ticker_csv(
+            df,
+            output_dir=csv_dir,
+            ticker_name_map=ticker_name_map,
+            desc="Saving processed CSVs",
+        )
+    else:
+        print("⏭️  종목별 CSV 저장 비활성화 (output.save_csv.stage_02=false)")
 
 
 def filter_by_history(df: pd.DataFrame, min_history: int, threshold_ratio: float = 1.0) -> pd.DataFrame:

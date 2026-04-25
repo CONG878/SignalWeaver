@@ -4,9 +4,11 @@ Data Collection Engine
 KRX 주가 데이터 및 종목 마스터 정보를 수집합니다.
 
 ## 버전
+- v4.1.0: output.save_csv.stage_01 플래그로 CSV 저장 제어.
+          save_ticker_csv() 모듈 사용 (src/utils/export.py).
+          data_collection.save_csv 설정 키 제거 (output.save_csv.stage_01로 통합).
 - v4.0.0: change_pct 자동 검증 로직 추가.
-          단순 등락률이면 'change_rate', 퍼센트 등락률이면 'change_pct'로 저장.
-          산출물 파일명 변경 반영 (ProjectPaths v4.0.0 준수):
+          산출물 파일명 변경 (ProjectPaths v4.0.0 준수):
             krx_prices_{date}.parquet → prices.parquet
             ticker_master_{date}.csv  → ticker_master.csv
 - v3.8.1: Fallback 강화 (3단계 우선순위)
@@ -30,6 +32,8 @@ except ImportError:
     raise ImportError(
         "FinanceDataReader가 설치되지 않았습니다. 설치: pip install finance-datareader"
     )
+
+from src.utils.export import save_ticker_csv, should_save_csv
 
 
 # ==========================================
@@ -161,6 +165,9 @@ class RawPriceCollector:
     """
     KRX 원시 데이터 수집 및 다중 포맷 저장.
 
+    v4.1.0 변경:
+    - CSV 저장 여부를 output.save_csv.stage_01 플래그로 제어.
+      수집 루프 중 스트리밍 방식으로 개별 저장 (메모리 효율 유지).
     v4.0.0 변경:
     - 수집 완료 후 change_pct 자동 검증 및 컬럼명 결정
     - 산출물 파일명: prices.parquet, ticker_master.csv (날짜 중복 제거)
@@ -183,8 +190,11 @@ class RawPriceCollector:
         self.parquet_path = self.paths.get_raw_parquet()      # prices.parquet
         self.master_path  = self.paths.get_ticker_master()    # ticker_master.csv
 
+        # v4.1.0: output.save_csv.stage_01 플래그
+        self._save_csv = should_save_csv(config, 1)
+
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        if self.cfg['data_collection'].get('save_csv', False):
+        if self._save_csv:
             self.csv_dir.mkdir(parents=True, exist_ok=True)
 
     def fetch_ohlcv(self, ticker: str) -> pd.DataFrame:
@@ -218,11 +228,24 @@ class RawPriceCollector:
             return pd.DataFrame()
 
     def collect_all(self, ticker_list: List[Tuple[str, str]]) -> Dict[str, int]:
-        """전체 종목 수집 및 다중 포맷 저장 실행."""
+        """전체 종목 수집 및 다중 포맷 저장 실행.
+
+        Notes
+        -----
+        CSV 저장(save_csv=True)은 수집 루프 중 종목별 스트리밍으로 처리합니다.
+        전체 DataFrame을 메모리에 모은 뒤 재순회하는 방식보다 메모리 효율적입니다.
+        """
         # 종목 마스터 저장 (v4.0.0: ticker_master.csv)
         df_master = pd.DataFrame(ticker_list, columns=['ticker', 'name'])
         df_master.to_csv(self.master_path, index=False, encoding='utf-8-sig')
         print(f"✅ 종목 마스터 저장 완료: {self.master_path}")
+
+        if self._save_csv:
+            print(f"📂 종목별 CSV 저장 활성화 → {self.csv_dir}")
+        else:
+            print("⏭️  종목별 CSV 저장 비활성화 (output.save_csv.stage_01=false)")
+
+        ticker_name_map = dict(ticker_list)   # {ticker: name}
 
         stats   = {'success': 0, 'failed': 0, 'empty': 0}
         all_dfs = []
@@ -234,7 +257,8 @@ class RawPriceCollector:
                 stats['empty'] += 1
                 continue
 
-            if self.cfg['data_collection'].get('save_csv', False):
+            # v4.1.0: should_save_csv 플래그로 스트리밍 CSV 저장
+            if self._save_csv:
                 safe_name = name.replace('/', '_').replace('\\', '_')
                 csv_path  = self.csv_dir / f"{safe_name}.csv"
                 df.to_csv(csv_path, index=False, encoding='utf-8-sig')
